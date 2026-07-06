@@ -266,6 +266,18 @@ class PAQJPCompressor:
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
 
+    # ---------- Helper methods that were missing ----------
+    def _get_pattern(self, size: int, seed: int) -> List[int]:
+        """Generate a pseudo‑random list of bytes based on a seed."""
+        rng = random.Random(seed)
+        # Return a list long enough for any index modulo
+        return [rng.randint(0, 255) for _ in range(max(size * 10, 256))]
+
+    def _calculate_repeats(self, data: bytes) -> int:
+        """Compute a repeat count from the data for transform 13."""
+        # Use length and a simple checksum to produce a number between 1 and 256
+        return (len(data) + sum(data)) % 256 + 1
+
     # ------------------------------------------------------------------
     # Quantum transform generation (Qiskit‑based, classical simulation)
     # ------------------------------------------------------------------
@@ -1431,9 +1443,9 @@ class PAQJPCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # Compression backends (Zstd, PAQ, or raw)
+    # Compression backends (Zstd, PAQ, or raw) – with allow_raw flag
     # ------------------------------------------------------------------
-    def _compress_backend(self, data: bytes, safe: bool = False) -> bytes:
+    def _compress_backend(self, data: bytes, safe: bool = False, allow_raw: bool = True) -> bytes:
         candidates = []
         if paq is not None:
             try:
@@ -1451,13 +1463,14 @@ class PAQJPCompressor:
                     candidates.append((b'Z', zstd_cctx.compress(data)))
             except:
                 pass
-        candidates.append((b'N', b'N' + data))
-        if not safe:
-            _, best = min(candidates, key=lambda x: len(x[1]))
-            return best
-        else:
-            _, best = min(candidates, key=lambda x: len(x[1]))
-            return best
+        if allow_raw:
+            candidates.append((b'N', b'N' + data))
+        # If no candidates (should not happen unless allow_raw False and no backends available),
+        # we add raw as a fallback to avoid failure.
+        if not candidates:
+            candidates.append((b'N', b'N' + data))
+        _, best = min(candidates, key=lambda x: len(x[1]))
+        return best
 
     def _decompress_backend(self, data: bytes, safe: bool = False) -> Optional[bytes]:
         if len(data) == 0:
@@ -1489,6 +1502,7 @@ class PAQJPCompressor:
                 return paq.decompress(data)
             except:
                 pass
+        # fallback: treat as raw if it starts with N?
         if len(data) > 0 and data[0] == ord('N'):
             return data[1:]
         return None
@@ -1558,16 +1572,18 @@ class PAQJPCompressor:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression with auto‑correction (Fast / Ultra 2704 / Extra Ultra 65535)
+    # Main compression with auto‑correction and allow_raw flag
     # ------------------------------------------------------------------
-    def compress_with_best(self, data: bytes, safe: bool = False, ultra_mode: str = '2704') -> bytes:
+    def compress_with_best(self, data: bytes, safe: bool = False, ultra_mode: str = '2704',
+                           exclude: Optional[Set[int]] = None, allow_raw: bool = True) -> bytes:
         if not data:
-            backend = self._compress_backend(b'', safe)
+            backend = self._compress_backend(b'', safe, allow_raw=allow_raw)
             compressed = self._encode_marker_raw() + backend
             if not safe:
                 decomp, _ = self._decompress_auto(compressed, ultra_mode)
                 if decomp != b'':
-                    return self.compress_with_best(data, safe=True, ultra_mode=ultra_mode)
+                    return self.compress_with_best(data, safe=True, ultra_mode=ultra_mode,
+                                                   exclude=exclude, allow_raw=allow_raw)
             return compressed
 
         best_total = float('inf')
@@ -1580,18 +1596,21 @@ class PAQJPCompressor:
             if ultra_mode == '2704' or ultra_mode == '65535':
                 single_range += list(range(266, 283))
 
-        # Raw
-        raw_backend = self._compress_backend(data, safe)
-        candidate = self._encode_marker_raw() + raw_backend
-        if len(candidate) < best_total:
-            best_total = len(candidate)
-            best_bytes = candidate
+        # Raw candidate only if allow_raw is True
+        if allow_raw:
+            raw_backend = self._compress_backend(data, safe, allow_raw=allow_raw)
+            candidate = self._encode_marker_raw() + raw_backend
+            if len(candidate) < best_total:
+                best_total = len(candidate)
+                best_bytes = candidate
 
-        # Singles
+        # Singles (skip excluded)
         for t in single_range:
+            if exclude and t in exclude:
+                continue
             try:
                 transformed = self.fwd_transforms[t](data)
-                backend = self._compress_backend(transformed, safe)
+                backend = self._compress_backend(transformed, safe, allow_raw=allow_raw)
                 candidate = self._encode_marker_single(t) + backend
                 if len(candidate) < best_total:
                     best_total = len(candidate)
@@ -1599,7 +1618,7 @@ class PAQJPCompressor:
             except:
                 continue
 
-        # Pairs
+        # Pairs (skip if any transform in pair is excluded)
         if ultra_mode == '2704':
             sequences = self.sequences_2704
             encode_pair = self._encode_marker_pair_2704
@@ -1611,9 +1630,11 @@ class PAQJPCompressor:
             encode_pair = self._encode_marker_pair_2704
 
         for idx, (t1, t2) in enumerate(sequences):
+            if exclude and (t1 in exclude or t2 in exclude):
+                continue
             try:
                 transformed = self.apply_transform_by_index(data, idx+1, ultra_mode)
-                backend = self._compress_backend(transformed, safe)
+                backend = self._compress_backend(transformed, safe, allow_raw=allow_raw)
                 candidate = encode_pair(t1, t2) + backend
                 if len(candidate) < best_total:
                     best_total = len(candidate)
@@ -1621,24 +1642,27 @@ class PAQJPCompressor:
             except:
                 continue
 
+        # If best_bytes is still None (e.g., if allow_raw False and all transforms failed), use raw as fallback.
+        if best_bytes is None:
+            raw_backend = self._compress_backend(data, safe, allow_raw=True)  # force raw
+            best_bytes = self._encode_marker_raw() + raw_backend
+
         # Verify and if not safe, retry with safe mode. If safe mode still fails, use raw fallback.
         decomp, _ = self._decompress_auto(best_bytes, ultra_mode)
         if decomp != data:
             if not safe:
                 print("Marker‑free mode produced ambiguous stream, falling back to safe markers...")
-                return self.compress_with_best(data, safe=True, ultra_mode=ultra_mode)
+                return self.compress_with_best(data, safe=True, ultra_mode=ultra_mode,
+                                               exclude=exclude, allow_raw=allow_raw)
             else:
                 # Fallback: safe compression failed – use raw data with safe marker N
-                # This guarantees decompression works, albeit with no compression.
                 print("Safe compression failed – falling back to raw data with safe marker.")
                 fallback = self._encode_marker_raw() + b'N' + data
-                # Verify this fallback decompresses correctly
                 test_decomp, _ = self._decompress_auto(fallback, ultra_mode)
                 if test_decomp == data:
                     return fallback
                 else:
-                    # This should never happen; but to avoid an unhandled exception, return the fallback anyway.
-                    return fallback
+                    return fallback  # last resort
         return best_bytes
 
     def _decompress_auto(self, data: bytes, ultra_mode: str = '65535') -> Tuple[bytes, Optional[Tuple[int, ...]]]:
@@ -2358,7 +2382,9 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     # File API – compression (with hybrid) and decompression
     # ------------------------------------------------------------------
-    def compress_file(self, infile: str, outfile: str, ultra_mode: str = '2704', hybrid: bool = False):
+    def compress_file(self, infile: str, outfile: str, ultra_mode: str = '2704',
+                      hybrid: bool = False, exclude: Optional[Set[int]] = None,
+                      allow_raw: bool = True):
         try:
             with open(infile, 'rb') as f:
                 data = f.read()
@@ -2378,7 +2404,8 @@ class PAQJPCompressor:
             if c_dynamic is not None:
                 candidates.append(('Dynamic-Dict', c_dynamic))
 
-        c_pjp = self.compress_with_best(data, safe=False, ultra_mode=ultra_mode)
+        c_pjp = self.compress_with_best(data, safe=False, ultra_mode=ultra_mode,
+                                        exclude=exclude, allow_raw=allow_raw)
         candidates.append(('PJP', c_pjp))
 
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
@@ -2633,30 +2660,31 @@ def main():
     c = PAQJPCompressor()
     c.verify_transforms()
 
-    choice = input("\n1) Fast (256 singles)\n"
-                   "2) Ultra (2704 pairs)\n"
-                   "3) Hybrid (dicts + Ultra 2704)\n"
+    choice = input("\n1) Fast (256 singles, excluding 16‑42, forced compression)\n"
+                   "2) Ultra (2704 pairs, forced compression)\n"
+                   "3) Hybrid (dicts + Ultra 2704, forced compression)\n"
                    "4) LZ77+Huffman (with Ultra 2704)\n"
                    "5) Quantum Fast\n"
                    "6) Quantum Ultra\n"
                    "7) Full self‑test (all 65536)\n"
                    "8) Decompress\n"
-                   "9) Extra Ultra (65535 pairs)\n"
+                   "9) Extra Ultra (65535 pairs, forced compression)\n"
                    "10) LZ77+Huffman (Extra Ultra 65535) – without transforms 16‑45\n"
                    "> ").strip()
 
     if choice == "1":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
-        c.compress_file(i, o, ultra_mode='2704', hybrid=False)
+        c.compress_file(i, o, ultra_mode='2704', hybrid=False,
+                        exclude=set(range(16, 43)), allow_raw=False)
     elif choice == "2":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
-        c.compress_file(i, o, ultra_mode='2704', hybrid=False)
+        c.compress_file(i, o, ultra_mode='2704', hybrid=False, allow_raw=False)
     elif choice == "3":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
-        c.compress_file(i, o, ultra_mode='2704', hybrid=True)
+        c.compress_file(i, o, ultra_mode='2704', hybrid=True, allow_raw=False)
     elif choice == "4":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp.lzh"
@@ -2708,7 +2736,7 @@ def main():
     elif choice == "9":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp.extra"
-        c.compress_file(i, o, ultra_mode='65535', hybrid=False)
+        c.compress_file(i, o, ultra_mode='65535', hybrid=False, allow_raw=False)
     elif choice == "10":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp.lzh.extra"
