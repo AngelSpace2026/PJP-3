@@ -1706,7 +1706,7 @@ class PAQJPCompressor:
         return result, seq
 
     # ------------------------------------------------------------------
-    # LZ77 + Huffman (2 KB window) – from original
+    # LZ77 + Huffman (2 KB window) – with fixed Huffman heap
     # ------------------------------------------------------------------
     WINDOW_SIZE = 2048
     MIN_MATCH = 3
@@ -1754,21 +1754,27 @@ class PAQJPCompressor:
                     out.append(out[start + k])
         return bytes(out)
 
+    # ----- Fixed Huffman functions -----
     def _huffman_code_lengths(self, freq: List[int]) -> List[int]:
-        heap = [(f, i, i) for i, f in enumerate(freq) if f > 0]
+        # Build heap with unique counter to avoid tuple/int comparison
+        heap = []
+        counter = 0
+        for i, f in enumerate(freq):
+            if f > 0:
+                heapq.heappush(heap, (f, counter, i))
+                counter += 1
         if not heap:
             return [0] * len(freq)
         if len(heap) == 1:
             lengths = [0] * len(freq)
             lengths[heap[0][2]] = 1
             return lengths
-        heapq.heapify(heap)
-        next_id = len(heap)
         while len(heap) > 1:
             f1, _, n1 = heapq.heappop(heap)
             f2, _, n2 = heapq.heappop(heap)
-            heapq.heappush(heap, (f1 + f2, next_id, (n1, n2)))
-            next_id += 1
+            heapq.heappush(heap, (f1 + f2, counter, (n1, n2)))
+            counter += 1
+        _, _, root = heap[0]
         lengths = [0] * len(freq)
         def traverse(node, depth):
             if isinstance(node, int):
@@ -1777,7 +1783,6 @@ class PAQJPCompressor:
                 left, right = node
                 traverse(left, depth + 1)
                 traverse(right, depth + 1)
-        _, _, root = heap[0]
         traverse(root, 0)
         return lengths
 
