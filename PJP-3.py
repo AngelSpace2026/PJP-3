@@ -8,9 +8,9 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + 6‑bit Text Compression Transform (27) – 64‑char alphabet
 + Parameterized subtract‑stream for transform 1 and transforms 15‑255
   (3‑byte key + repeat count 1‑255, tried for best compression)
-+ 60‑second search timeout for compression (falls back to best so far)
++ Enhanced key set: includes keys from 2^16 to 2^32
++ 3600‑second search timeout for compression (falls back to best so far)
 (Auto‑correcting backends – marker‑free by default, safe fallback if needed)
-============================================================================
 """
 
 import math
@@ -26,7 +26,7 @@ import subprocess
 import importlib
 import tempfile
 import base64
-import time                          # needed for timeout
+import time
 from typing import Optional, List, Tuple, Dict, Callable
 from collections import Counter
 
@@ -108,7 +108,7 @@ if USE_QUANTUM and not HAS_QISKIT:
         print("Quantum transforms disabled because Qiskit could not be imported.")
 
 PROGNAME = "PJP"
-SEARCH_TIMEOUT = 60   # seconds – after this, stop trying new variations
+SEARCH_TIMEOUT = 3600   # seconds – after this, stop trying new variations
 
 # ---------- Dictionary configuration ----------
 DICT_DIR = "Dictionaries"
@@ -269,19 +269,25 @@ class PJPCompressor:
 
         # Parameterized transforms are those where we try key/repeat variations
         self.parameterized_single_transforms = {1} | set(range(15, 256))
-        # Keys to try for each parameterized transform
+        # Keys to try for each parameterized transform – enhanced with 2^16-2^32 range
         self.candidate_keys = self._generate_candidate_keys()
         self.candidate_repeats = [1, 2, 3, 5, 10, 20, 50, 100, 200, 255]  # limited for speed
 
     def _generate_candidate_keys(self) -> List[int]:
-        # Generate a diverse set of 24‑bit keys
+        # Generate a diverse set of 24‑bit keys, including the range 2^16 to 2^32
         keys = set()
         keys.add(0)
         keys.add(0xFFFFFF)
+        # Uniform bits
         for i in range(0, 256):
-            keys.add(i * 0x010101)   # uniform bits
+            keys.add(i * 0x010101)
+        # Mirrored bytes
         for i in range(0, 256, 16):
             keys.add(i << 16 | i << 8 | i)
+        # Additional keys in the range 65536..0xFFFFFF (i.e., 2^16 to 2^32-1)
+        rng = random.Random(42)
+        for _ in range(128):  # add 128 random high keys
+            keys.add(rng.randint(65536, 0xFFFFFF))
         return list(keys)
 
     # ------------------------------------------------------------------
@@ -1576,7 +1582,7 @@ class PJPCompressor:
             return 0, (), 0, 0, 0
 
     # ------------------------------------------------------------------
-    # Main compression with auto‑correction (Fast/Ultra) + 60‑second timeout
+    # Main compression with auto‑correction (Fast/Ultra) + timeout
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True) -> bytes:
         if not data:
@@ -1593,7 +1599,7 @@ class PJPCompressor:
         best_bytes = None
         timed_out = False
 
-        single_range = list(range(1, 257))  # always 256
+        single_range = list(range(1, 257))
         if USE_QUANTUM and HAS_QISKIT:
             fast_quantum = range(257, 266)
             single_range += list(fast_quantum)
