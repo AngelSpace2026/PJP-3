@@ -8,6 +8,7 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + 6‑bit Text Compression Transform (27) – 64‑char alphabet
 + Parameterized subtract‑stream for transform 1 and transforms 15‑255
   (3‑byte key + repeat count 1‑255, tried for best compression)
++ 60‑second search timeout for compression (falls back to best so far)
 (Auto‑correcting backends – marker‑free by default, safe fallback if needed)
 ============================================================================
 """
@@ -25,6 +26,7 @@ import subprocess
 import importlib
 import tempfile
 import base64
+import time                          # needed for timeout
 from typing import Optional, List, Tuple, Dict, Callable
 from collections import Counter
 
@@ -106,6 +108,7 @@ if USE_QUANTUM and not HAS_QISKIT:
         print("Quantum transforms disabled because Qiskit could not be imported.")
 
 PROGNAME = "PJP"
+SEARCH_TIMEOUT = 60   # seconds – after this, stop trying new variations
 
 # ---------- Dictionary configuration ----------
 DICT_DIR = "Dictionaries"
@@ -279,7 +282,6 @@ class PJPCompressor:
             keys.add(i * 0x010101)   # uniform bits
         for i in range(0, 256, 16):
             keys.add(i << 16 | i << 8 | i)
-        # add some data‑driven keys later (cannot be static)
         return list(keys)
 
     # ------------------------------------------------------------------
@@ -687,7 +689,6 @@ class PJPCompressor:
     # Parameterized subtract‑stream transform (key=24‑bit, repeat=1‑255)
     # ------------------------------------------------------------------
     def _apply_subtract_stream(self, data: bytes, key: int, repeat: int) -> bytes:
-        """Subtract a pseudo-random stream (seeded with key) from each byte, repeated `repeat` times."""
         if not data:
             return b''
         result = data
@@ -701,16 +702,9 @@ class PJPCompressor:
         return result
 
     def _apply_add_stream(self, data: bytes, key: int, repeat: int) -> bytes:
-        """Reverse of _apply_subtract_stream."""
         if not data:
             return b''
         result = data
-        # Apply in reverse order because the stream is deterministic per pass
-        # and the order of passes matters (each pass transforms the data further).
-        # The correct reverse is to apply the same passes in reverse order
-        # but since the stream per pass is independent of data, the order of passes commutes.
-        # So we can apply the same `repeat` addition passes (or reverse the order).
-        # For safety, apply addition passes in forward order (they are invertible individually).
         for _ in range(repeat):
             rng = random.Random(key)
             out = bytearray()
@@ -1582,7 +1576,7 @@ class PJPCompressor:
             return 0, (), 0, 0, 0
 
     # ------------------------------------------------------------------
-    # Main compression with auto‑correction (Fast/Ultra)
+    # Main compression with auto‑correction (Fast/Ultra) + 60‑second timeout
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True) -> bytes:
         if not data:
@@ -1594,10 +1588,12 @@ class PJPCompressor:
                     return self.compress_with_best(data, safe=True, ultra=ultra)
             return compressed
 
+        start_time = time.time()
         best_total = float('inf')
         best_bytes = None
+        timed_out = False
 
-        single_range = list(range(1, 257))
+        single_range = list(range(1, 257))  # always 256
         if USE_QUANTUM and HAS_QISKIT:
             fast_quantum = range(257, 266)
             single_range += list(fast_quantum)
@@ -1611,12 +1607,21 @@ class PJPCompressor:
             best_total = len(candidate)
             best_bytes = candidate
 
-        # singles (including quantum and new transforms)
+        # singles (including parameterized)
         for t in single_range:
+            if time.time() - start_time > SEARCH_TIMEOUT:
+                timed_out = True
+                break
+
             if t in self.parameterized_single_transforms:
-                # try many key/repeat variations
                 for key in self._get_data_driven_keys(data):
+                    if time.time() - start_time > SEARCH_TIMEOUT:
+                        timed_out = True
+                        break
                     for rep in self.candidate_repeats:
+                        if time.time() - start_time > SEARCH_TIMEOUT:
+                            timed_out = True
+                            break
                         if rep < 1 or rep > 255:
                             continue
                         try:
@@ -1629,6 +1634,8 @@ class PJPCompressor:
                                 best_bytes = candidate
                         except:
                             continue
+                    if timed_out:
+                        break
             else:
                 try:
                     transformed = self.fwd_transforms[t](data)
@@ -1641,8 +1648,11 @@ class PJPCompressor:
                     continue
 
         # pairs – only if ultra mode is on
-        if ultra:
+        if ultra and not timed_out:
             for t1, t2 in self.sequences:
+                if time.time() - start_time > SEARCH_TIMEOUT:
+                    timed_out = True
+                    break
                 try:
                     transformed = self._apply_sequence(data, (t1, t2))
                     backend = self._compress_backend(transformed, safe)
@@ -1652,6 +1662,9 @@ class PJPCompressor:
                         best_bytes = candidate
                 except:
                     continue
+
+        if timed_out:
+            print(f"Search stopped after {SEARCH_TIMEOUT}s – using best result found so far.")
 
         decomp, _, _, _, _ = self._decompress_auto(best_bytes)
         if decomp != data:
@@ -1663,14 +1676,12 @@ class PJPCompressor:
         return best_bytes
 
     def _get_data_driven_keys(self, data: bytes) -> List[int]:
-        # Combine static candidate keys with some derived from the data
         keys = self.candidate_keys.copy()
         if data:
             keys.append(len(data))
             keys.append(sum(data))
             keys.append(max(data))
             keys.append(min(data))
-            # a few more based on data
             for i in [0, len(data)//2, len(data)-1]:
                 if i < len(data):
                     keys.append(data[i] * 0x010101)
@@ -1695,7 +1706,6 @@ class PJPCompressor:
 
         try:
             if not seq:
-                # single transform with possible parameters
                 if seq == ():  # raw
                     result = res
                 else:
@@ -2014,7 +2024,7 @@ class PJPCompressor:
                 print("\n[FAIL] Quantum transform test failed.")
                 return False
 
-        # 2. Pairs on all bytes
+        # 2. Pairs on all bytes (using the fixed safe base)
         print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
         for idx, seq in enumerate(self.sequences):
             for b in range(256):
@@ -2138,6 +2148,7 @@ class PJPCompressor:
         print("=" * 60)
         all_ok = True
 
+        # 1. Quick check: each pair on all 256 byte values
         print(f"Testing all {len(self.sequences)} pairs on all 256 byte values (quick)...")
         for idx, seq in enumerate(self.sequences):
             for b in range(256):
@@ -2162,6 +2173,7 @@ class PJPCompressor:
             return False
         print("  PASS: all pairs OK on all 256 byte values")
 
+        # 2. Test each pair on a random 64‑byte block
         print("\nTesting each pair on random 64‑byte block (round‑trip)...")
         rng = random.Random(42)
         for idx, seq in enumerate(self.sequences):
@@ -2184,6 +2196,7 @@ class PJPCompressor:
             return False
         print("  PASS: all pairs preserve random 64‑byte blocks")
 
+        # 3. Extraction check: compress & decompress a sample with Ultra and Hybrid
         print("\nTesting extraction (decompression) for Ultra mode...")
         sample_text = b"This is a sample text for extraction testing. It contains words and punctuation!"
         compressed_ultra = self.compress_with_best(sample_text, safe=False, ultra=True)
