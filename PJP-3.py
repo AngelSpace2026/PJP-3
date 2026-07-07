@@ -9,7 +9,7 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Transform 28: deterministic per‑3‑byte subtract
 + Transform 29: global‑key (16‑bit) per‑3‑byte subtract
 + Transform 30: global‑key (24‑bit) per‑3‑byte subtract (fast heuristic)
-+ Transform 31: per‑block division by global 16‑bit key
++ Transform 31: per‑block division by global 16‑bit key (single‑transform only, excluded from pairs)
 ============================================================================
 """
 
@@ -1461,7 +1461,7 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 31 – per‑block division by global 16‑bit key
+    # Transform 31 – per‑block division by global 16‑bit key (single‑transform only)
     # For each 3‑byte block (24‑bit value v), choose a global key k (1..65535)
     # and store quotient = v // k (0..255) and remainder = v % k (0..65535).
     # Output: pad_len (1) + key (2) + for each block: quotient (1) + remainder (2)
@@ -1477,7 +1477,6 @@ class PJPCompressor:
             values.append(val)
         best_key = 1
         best_cost = float('inf')
-        # Try keys 1..65535, fast for small files
         for k in range(1, 65536):
             total_remainder = 0
             for v in values:
@@ -1637,7 +1636,8 @@ class PJPCompressor:
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
         safe = []
         for i in range(1, 257):
-            if i in (1, 14, 22, 23, 24, 25, 26, 27):
+            # Exclude non‑bijective or length‑changing transforms
+            if i in (1, 14, 22, 23, 24, 25, 26, 27, 31):
                 continue
             safe.append(i)
             if len(safe) == 52:
@@ -1769,7 +1769,7 @@ class PJPCompressor:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression with flags for transforms 28–31
+    # Main compression with auto‑correction – flags for 28, 29, 30, 31
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
                            include_28: bool = False, include_29: bool = False,
