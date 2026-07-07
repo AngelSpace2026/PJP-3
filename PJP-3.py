@@ -9,7 +9,6 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Transform 28: deterministic per‑3‑byte subtract
 + Transform 29: global‑key (16‑bit) per‑3‑byte subtract
 + Transform 30: global‑key (24‑bit) per‑3‑byte subtract (fast heuristic)
-+ Transform 31: per‑block division by global 16‑bit key (single‑transform only, excluded from pairs)
 ============================================================================
 """
 
@@ -1461,74 +1460,6 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 31 – per‑block division by global 16‑bit key (single‑transform only)
-    # For each 3‑byte block (24‑bit value v), choose a global key k (1..65535)
-    # and store quotient = v // k (0..255) and remainder = v % k (0..65535).
-    # Output: pad_len (1) + key (2) + for each block: quotient (1) + remainder (2)
-    # ------------------------------------------------------------------
-    def _find_best_division_key(self, data: bytes) -> int:
-        if len(data) < 3:
-            return 1
-        pad_len = (3 - len(data) % 3) % 3
-        padded = data + b'\x00' * pad_len
-        values = []
-        for i in range(0, len(padded), 3):
-            val = int.from_bytes(padded[i:i+3], 'little')
-            values.append(val)
-        best_key = 1
-        best_cost = float('inf')
-        for k in range(1, 65536):
-            total_remainder = 0
-            for v in values:
-                total_remainder += v % k
-                if total_remainder >= best_cost:
-                    break
-            else:
-                if total_remainder < best_cost:
-                    best_cost = total_remainder
-                    best_key = k
-        return best_key
-
-    def transform_31(self, data: bytes) -> bytes:
-        if not data:
-            return b''
-        key = self._find_best_division_key(data)
-        pad_len = (3 - len(data) % 3) % 3
-        padded = data + b'\x00' * pad_len
-        out = bytearray([pad_len])
-        out.extend(key.to_bytes(2, 'little'))
-        for i in range(0, len(padded), 3):
-            chunk = padded[i:i+3]
-            val = int.from_bytes(chunk, 'little')
-            quot = val // key
-            rem = val % key
-            out.append(quot)
-            out.extend(rem.to_bytes(2, 'little'))
-        return bytes(out)
-
-    def reverse_transform_31(self, data: bytes) -> bytes:
-        if len(data) < 3:
-            return data
-        pad_len = data[0]
-        if len(data) < 1 + 2:
-            return data
-        key = int.from_bytes(data[1:3], 'little')
-        if key == 0:
-            key = 1
-        payload = data[3:]
-        if len(payload) % 3 != 0:
-            return data
-        out = bytearray()
-        for i in range(0, len(payload), 3):
-            quot = payload[i]
-            rem = int.from_bytes(payload[i+1:i+3], 'little')
-            val = quot * key + rem
-            out.extend(val.to_bytes(3, 'little'))
-        if pad_len > 0:
-            out = out[:-pad_len]
-        return bytes(out)
-
-    # ------------------------------------------------------------------
     # Transform 256 – no-op
     # ------------------------------------------------------------------
     def transform_256(self, d: bytes) -> bytes:
@@ -1611,12 +1542,8 @@ class PJPCompressor:
         self.fwd_transforms[30] = self.transform_30
         self.rev_transforms[30] = self.reverse_transform_30
 
-        # 31 – per‑block division by global 16‑bit key
-        self.fwd_transforms[31] = self.transform_31
-        self.rev_transforms[31] = self.reverse_transform_31
-
-        # 32‑255 dynamic
-        for i in range(32, 256):
+        # 31‑255 dynamic (31 is now free for future use)
+        for i in range(31, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
@@ -1636,8 +1563,8 @@ class PJPCompressor:
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
         safe = []
         for i in range(1, 257):
-            # Exclude non‑bijective or length‑changing transforms
-            if i in (1, 14, 22, 23, 24, 25, 26, 27, 31):
+            # Exclude non‑bijective transforms
+            if i in (1, 14, 22, 23, 24, 25, 26, 27):
                 continue
             safe.append(i)
             if len(safe) == 52:
@@ -1769,11 +1696,11 @@ class PJPCompressor:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression with auto‑correction – flags for 28, 29, 30, 31
+    # Main compression with auto‑correction – flags for 28, 29, 30
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
                            include_28: bool = False, include_29: bool = False,
-                           include_30: bool = False, include_31: bool = False) -> bytes:
+                           include_30: bool = False) -> bytes:
         if not data:
             backend = self._compress_backend(b'', safe)
             compressed = self._encode_marker_raw() + backend
@@ -1782,13 +1709,13 @@ class PJPCompressor:
                 if decomp != b'':
                     return self.compress_with_best(data, safe=True, ultra=ultra,
                                                    include_28=include_28, include_29=include_29,
-                                                   include_30=include_30, include_31=include_31)
+                                                   include_30=include_30)
             return compressed
 
         best_total = float('inf')
         best_bytes = None
 
-        # Build list of single transforms (1..256) – exclude 28-31 if not allowed
+        # Build list of single transforms (1..256) – exclude 28-30 if not allowed
         single_transforms = list(range(1, 257))
         if not include_28:
             single_transforms = [t for t in single_transforms if t != 28]
@@ -1796,8 +1723,6 @@ class PJPCompressor:
             single_transforms = [t for t in single_transforms if t != 29]
         if not include_30:
             single_transforms = [t for t in single_transforms if t != 30]
-        if not include_31:
-            single_transforms = [t for t in single_transforms if t != 31]
 
         # Add quantum transforms if enabled
         if USE_QUANTUM and HAS_QISKIT:
@@ -1814,8 +1739,6 @@ class PJPCompressor:
             allowed_pairs = [seq for seq in allowed_pairs if 29 not in seq]
         if not include_30:
             allowed_pairs = [seq for seq in allowed_pairs if 30 not in seq]
-        if not include_31:
-            allowed_pairs = [seq for seq in allowed_pairs if 31 not in seq]
 
         # raw
         raw_backend = self._compress_backend(data, safe)
@@ -1855,7 +1778,7 @@ class PJPCompressor:
                 print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
                 return self.compress_with_best(data, safe=True, ultra=ultra,
                                                include_28=include_28, include_29=include_29,
-                                               include_30=include_30, include_31=include_31)
+                                               include_30=include_30)
             else:
                 raise RuntimeError("Safe compression failed – unexpected internal error!")
         return best_bytes
@@ -2118,7 +2041,7 @@ class PJPCompressor:
         return ok
 
     # ------------------------------------------------------------------
-    # Exhaustive self‑test (includes transforms 28–31)
+    # Exhaustive self‑test (includes transforms 28–30)
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -2210,7 +2133,7 @@ class PJPCompressor:
         for mode_name, safe in [("marker‑free", False), ("safe", True)]:
             compressed = self.compress_with_best(test_data, safe=safe, ultra=True,
                                                  include_28=True, include_29=True,
-                                                 include_30=True, include_31=True)
+                                                 include_30=True)
             decompressed, _ = self._decompress_auto(compressed)
             if decompressed != test_data:
                 print(f"  FAIL: random data pipeline mismatch in {mode_name} mode")
@@ -2222,7 +2145,7 @@ class PJPCompressor:
         print("\nTesting empty input...")
         for safe in [False, True]:
             compressed_empty = self.compress_with_best(b'', safe, include_28=True, include_29=True,
-                                                       include_30=True, include_31=True)
+                                                       include_30=True)
             decomp_empty, _ = self._decompress_auto(compressed_empty)
             if decomp_empty != b'':
                 print(f"  FAIL: empty input pipeline mismatch (safe={safe})")
@@ -2289,7 +2212,7 @@ class PJPCompressor:
         else:
             print("  PASS: 6‑bit transform on alphabet-only text")
 
-        # Test transforms 28–31
+        # Test transforms 28–30
         print("\nTesting transform 28 on random data...")
         test28 = bytes(rng.randint(0, 255) for _ in range(100))
         enc28 = self.transform_28(test28)
@@ -2319,16 +2242,6 @@ class PJPCompressor:
             all_ok = False
         else:
             print("  PASS: transform 30 round‑trip OK")
-
-        print("\nTesting transform 31 on random data...")
-        test31 = bytes(rng.randint(0, 255) for _ in range(100))
-        enc31 = self.transform_31(test31)
-        dec31 = self.reverse_transform_31(enc31)
-        if dec31 != test31:
-            print("  FAIL: transform 31 round‑trip mismatch")
-            all_ok = False
-        else:
-            print("  PASS: transform 31 round‑trip OK")
 
         if all_ok:
             print("\n[All tests passed – compressor is 100% lossless]")
@@ -2398,7 +2311,7 @@ class PJPCompressor:
         sample_text = b"This is a sample text for extraction testing. It contains words and punctuation!"
         compressed_ultra = self.compress_with_best(sample_text, safe=False, ultra=True,
                                                    include_28=True, include_29=True,
-                                                   include_30=True, include_31=True)
+                                                   include_30=True)
         decompressed_ultra, _ = self._decompress_auto(compressed_ultra)
         if decompressed_ultra != sample_text:
             print("  FAIL: Ultra mode extraction mismatch")
@@ -2413,7 +2326,7 @@ class PJPCompressor:
         try:
             tmp_out_name = tmp_in_name + ".pjp"
             self.compress_file(tmp_in_name, tmp_out_name, ultra=True, hybrid=True,
-                               include_28=True, include_29=True, include_30=True, include_31=True)
+                               include_28=True, include_29=True, include_30=True)
             tmp_decomp_name = tmp_in_name + ".orig"
             self.decompress_file(tmp_out_name, tmp_decomp_name)
             with open(tmp_decomp_name, 'rb') as f:
@@ -2442,7 +2355,7 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True, hybrid: bool = False,
                       include_28: bool = False, include_29: bool = False,
-                      include_30: bool = False, include_31: bool = False):
+                      include_30: bool = False):
         try:
             with open(infile, 'rb') as f:
                 data = f.read()
@@ -2464,7 +2377,7 @@ class PJPCompressor:
 
         c_pjp = self.compress_with_best(data, safe=False, ultra=ultra,
                                         include_28=include_28, include_29=include_29,
-                                        include_30=include_30, include_31=include_31)
+                                        include_30=include_30)
         candidates.append(('PJP', c_pjp))
 
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
@@ -2523,8 +2436,8 @@ class PJPCompressor:
 # Main
 # ------------------------------------------------------------
 def main():
-    print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–31")
-    print("Options 1-3 do NOT use transforms 28–31; option 4 (Absolute) includes all four.")
+    print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30")
+    print("Options 1-3 do NOT use transforms 28–30; option 4 (Absolute) includes all three.")
     print("Dictionary entries are read as plain text or Base64‑encoded UTF‑8.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
@@ -2532,10 +2445,10 @@ def main():
     c = PJPCompressor()
     c.verify_transforms()
 
-    choice = input("\n1) Fast (no 28-31) – 256 singles\n"
-                   "2) Ultra (no 28-31) – 256 singles + 2704 pairs\n"
-                   "3) Hybrid (no 28-31) – dicts + Ultra\n"
-                   "4) Absolute (with 28, 29, 30, 31) – all transforms\n"
+    choice = input("\n1) Fast (no 28-30) – 256 singles\n"
+                   "2) Ultra (no 28-30) – 256 singles + 2704 pairs\n"
+                   "3) Hybrid (no 28-30) – dicts + Ultra\n"
+                   "4) Absolute (with 28, 29, 30) – all transforms\n"
                    "5) Full self‑test\n"
                    "6) Decompress (extract)\n"
                    "7) Test 2704 pairs & extraction check\n"
@@ -2545,22 +2458,22 @@ def main():
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
         c.compress_file(i, o, ultra=False, hybrid=False,
-                        include_28=False, include_29=False, include_30=False, include_31=False)
+                        include_28=False, include_29=False, include_30=False)
     elif choice == "2":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
         c.compress_file(i, o, ultra=True, hybrid=False,
-                        include_28=False, include_29=False, include_30=False, include_31=False)
+                        include_28=False, include_29=False, include_30=False)
     elif choice == "3":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
         c.compress_file(i, o, ultra=True, hybrid=True,
-                        include_28=False, include_29=False, include_30=False, include_31=False)
+                        include_28=False, include_29=False, include_30=False)
     elif choice == "4":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
         c.compress_file(i, o, ultra=True, hybrid=True,
-                        include_28=True, include_29=True, include_30=True, include_31=True)
+                        include_28=True, include_29=True, include_30=True)
     elif choice == "5":
         c.full_self_test()
     elif choice == "6":
