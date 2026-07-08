@@ -11,6 +11,7 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Transform 30: global‑key (24‑bit) subtract (fast heuristic)
 + Transform 31: global‑key (16‑bit) subtract (minimizing sum of transformed values)
 + DOCX support: extract text, compress, rebuild .docx (auto‑installs python-docx)
++ Base64 TXT support: compress DOCX → base64 .txt, and decompress back
 ============================================================================
 """
 
@@ -1996,6 +1997,40 @@ class PJPCompressor:
             print(f"Error decompressing to DOCX: {e}")
 
     # ------------------------------------------------------------------
+    # NEW: Base64 TXT support (compress DOCX to Base64 .txt, decompress back)
+    # ------------------------------------------------------------------
+    def compress_docx_to_txt(self, docx_path: str, txt_path: str):
+        """Extract text, compress with Absolute mode, base64 encode, save as .txt"""
+        try:
+            text_bytes = self._extract_text_from_docx(docx_path)
+            print(f"Extracted {len(text_bytes)} bytes of text from {docx_path}")
+            compressed = self.compress_with_best(text_bytes, safe=False, ultra=True,
+                                                 include_28=True, include_29=True,
+                                                 include_30=True, include_31=True)
+            b64 = base64.b64encode(compressed).decode('ascii')
+            with open(txt_path, 'w') as f:
+                f.write(b64)
+            print(f"Compressed {len(text_bytes)} → {len(compressed)} bytes (base64: {len(b64)} chars) → {txt_path}")
+        except Exception as e:
+            print(f"Error compressing DOCX to TXT: {e}")
+
+    def decompress_txt_to_docx(self, txt_path: str, docx_path: str):
+        """Read base64 .txt, decode, decompress, create .docx"""
+        try:
+            with open(txt_path, 'r') as f:
+                b64 = f.read().strip()
+            compressed = base64.b64decode(b64)
+            original, seq = self._decompress_auto(compressed)
+            if original is None:
+                print("Decompression failed.")
+                return
+            self._create_docx_from_text(original, docx_path)
+            seq_str = "raw" if not seq else f"sequence {seq}"
+            print(f"Decompressed ({seq_str}) → {docx_path} ({len(original)} bytes)")
+        except Exception as e:
+            print(f"Error decompressing TXT to DOCX: {e}")
+
+    # ------------------------------------------------------------------
     # Dictionary compression helpers (for hybrid mode) – unchanged
     # ------------------------------------------------------------------
     MAGIC_DICT = b'DICT'
@@ -2636,6 +2671,7 @@ def main():
     print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–31")
     print("Options 1-3 include transform 31; Option 4 (Absolute) adds 28,29,30,31.")
     print("Options 8-9 for DOCX compression/decompression (Absolute mode with 28-31).")
+    print("Options 10-11 for Base64 TXT compression/decompression (DOCX ↔ TXT).")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
 
@@ -2651,6 +2687,8 @@ def main():
                    "7) Test 2704 pairs & extraction check\n"
                    "8) Compress DOCX → PJP (extract text, compress with Absolute)\n"
                    "9) Decompress PJP → DOCX (rebuild .docx from text)\n"
+                   "10) Compress DOCX → Base64 TXT (extract text, compress, base64)\n"
+                   "11) Decompress Base64 TXT → DOCX (decode, decompress, rebuild)\n"
                    "> ").strip()
 
     if choice == "1":
@@ -2689,6 +2727,14 @@ def main():
         i = input("Input .pjp file: ").strip()
         o = input("Output .docx file: ").strip() or i.rsplit('.', 1)[0] + ".docx"
         c.decompress_docx(i, o)
+    elif choice == "10":
+        i = input("Input .docx file: ").strip()
+        o = input("Output .txt file: ").strip() or i + ".txt"
+        c.compress_docx_to_txt(i, o)
+    elif choice == "11":
+        i = input("Input .txt file (base64): ").strip()
+        o = input("Output .docx file: ").strip() or i.rsplit('.', 1)[0] + ".docx"
+        c.decompress_txt_to_docx(i, o)
     else:
         print("Invalid choice.")
 
