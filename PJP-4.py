@@ -10,9 +10,36 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Transform 29: global‑key (16‑bit) subtract (minimizing deviation from mean)
 + Transform 30: global‑key (24‑bit) subtract (fast heuristic)
 + Transform 31: global‑key (16‑bit) subtract (minimizing sum of transformed values)
-+ DOCX support: extract text, compress, rebuild .docx
++ DOCX support: extract text, compress, rebuild .docx (auto‑installs python-docx)
 ============================================================================
 """
+
+# --- AUTOMATIC PACKAGE INSTALLATION AT STARTUP ---
+import subprocess
+import sys
+import importlib
+
+def auto_install(pkg: str) -> bool:
+    """Install a package silently if missing."""
+    try:
+        importlib.import_module(pkg)
+        return True
+    except ImportError:
+        print(f"Auto‑installing {pkg}...")
+        try:
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
+            print(f"Successfully installed {pkg}")
+            return True
+        except Exception as e:
+            print(f"Failed to install {pkg}: {e}")
+            return False
+
+# Ensure python-docx is installed (needed for DOCX support)
+if not auto_install('docx'):
+    print("Warning: python-docx not available. DOCX compression will not work.")
+
+# Optionally ensure zstandard and paq are installed (they will be tried later anyway)
+# We'll let the main flow handle those.
 
 import math
 import random
@@ -266,13 +293,19 @@ class PJPCompressor:
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
 
-        # Check for docx support
+        # Check for docx support (already installed at top, but we verify)
+        self.HAS_DOCX = False
         try:
             import docx
             self.HAS_DOCX = True
         except ImportError:
-            self.HAS_DOCX = False
-            print("python-docx not found. Install with: pip install python-docx")
+            # Try installing again
+            if install_package('python-docx'):
+                try:
+                    import docx
+                    self.HAS_DOCX = True
+                except ImportError:
+                    pass
 
     # ------------------------------------------------------------------
     # Quantum transform generation (using Qiskit circuit as seed, no simulation)
@@ -1917,12 +1950,16 @@ class PJPCompressor:
 
     def compress_docx(self, infile: str, outfile: str):
         if not self.HAS_DOCX:
-            print("python-docx not found. Installing...")
+            # Try one more time to install
             if install_package('python-docx'):
-                self.HAS_DOCX = True
-                from docx import Document
+                try:
+                    import docx
+                    self.HAS_DOCX = True
+                except ImportError:
+                    print("python-docx installation failed. Please install manually: pip install python-docx")
+                    return
             else:
-                print("Failed to install python-docx.")
+                print("python-docx installation failed. Please install manually: pip install python-docx")
                 return
         try:
             text_bytes = self._extract_text_from_docx(infile)
@@ -1938,12 +1975,15 @@ class PJPCompressor:
 
     def decompress_docx(self, infile: str, outfile: str):
         if not self.HAS_DOCX:
-            print("python-docx not found. Installing...")
             if install_package('python-docx'):
-                self.HAS_DOCX = True
-                from docx import Document
+                try:
+                    import docx
+                    self.HAS_DOCX = True
+                except ImportError:
+                    print("python-docx installation failed. Please install manually: pip install python-docx")
+                    return
             else:
-                print("Failed to install python-docx.")
+                print("python-docx installation failed. Please install manually: pip install python-docx")
                 return
         try:
             with open(infile, 'rb') as f:
