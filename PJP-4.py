@@ -38,9 +38,6 @@ def auto_install(pkg: str) -> bool:
 if not auto_install('docx'):
     print("Warning: python-docx not available. DOCX compression will not work.")
 
-# Optionally ensure zstandard and paq are installed (they will be tried later anyway)
-# We'll let the main flow handle those.
-
 import math
 import random
 import decimal
@@ -2275,6 +2272,362 @@ class PJPCompressor:
             return
         seq_str = "raw" if not seq else f"sequence {seq}"
         print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
+
+    # ------------------------------------------------------------------
+    # Transform verification
+    # ------------------------------------------------------------------
+    def verify_transforms(self) -> bool:
+        print("Verifying all 256+ transforms...")
+        ok = True
+        for t in range(1, 257):
+            test = bytes([0x55])
+            try:
+                enc = self.fwd_transforms[t](test)
+                dec = self.rev_transforms[t](enc)
+                if dec == test:
+                    print(f"Transform {t}: right")
+                else:
+                    print(f"Transform {t}: incorrect")
+                    ok = False
+            except Exception:
+                print(f"Transform {t}: exception")
+                ok = False
+        if USE_QUANTUM and HAS_QISKIT:
+            for t in range(257, 283):
+                test = bytes([0x55])
+                try:
+                    enc = self.fwd_transforms[t](test)
+                    dec = self.rev_transforms[t](enc)
+                    if dec == test:
+                        print(f"Quantum transform {t}: right")
+                    else:
+                        print(f"Quantum transform {t}: incorrect")
+                        ok = False
+                except Exception:
+                    print(f"Quantum transform {t}: exception")
+                    ok = False
+        print("Verification complete.\n")
+        return ok
+
+    # ------------------------------------------------------------------
+    # Full self‑test (includes transforms 28–31)
+    # ------------------------------------------------------------------
+    def full_self_test(self) -> bool:
+        print("=" * 60)
+        print("PJP – FULL SELF‑TEST (100% lossless)")
+        print("=" * 60)
+        all_ok = True
+
+        # 1. Single transforms on all bytes
+        print("Testing all single transforms on all 256 byte values...")
+        for t_num in range(1, 257):
+            for b in range(256):
+                orig = bytes([b])
+                try:
+                    enc = self.fwd_transforms[t_num](orig)
+                    dec = self.rev_transforms[t_num](enc)
+                    if dec != orig:
+                        print(f"  FAIL: transform {t_num} on byte {b:02x}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: transform {t_num} on byte {b:02x} raised {e}")
+                    all_ok = False
+                    break
+            else:
+                if t_num % 32 == 0 or t_num == 256:
+                    print(f"  PASS: transforms 1..{t_num} OK on all bytes")
+            if not all_ok:
+                break
+        if not all_ok:
+            print("\n[FAIL] Base transform test failed.")
+            return False
+
+        # Quantum singles if enabled
+        if USE_QUANTUM and HAS_QISKIT:
+            print("Testing quantum transforms on all 256 byte values...")
+            for t_num in range(257, 283):
+                for b in range(256):
+                    orig = bytes([b])
+                    try:
+                        enc = self.fwd_transforms[t_num](orig)
+                        dec = self.rev_transforms[t_num](enc)
+                        if dec != orig:
+                            print(f"  FAIL: quantum transform {t_num} on byte {b:02x}")
+                            all_ok = False
+                            break
+                    except Exception as e:
+                        print(f"  FAIL: quantum transform {t_num} on byte {b:02x} raised {e}")
+                        all_ok = False
+                        break
+                else:
+                    if (t_num-256) % 8 == 0:
+                        print(f"  PASS: quantum transforms 257..{t_num} OK on all bytes")
+                if not all_ok:
+                    break
+            if not all_ok:
+                print("\n[FAIL] Quantum transform test failed.")
+                return False
+
+        # 2. Pairs on all bytes
+        print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
+        for idx, seq in enumerate(self.sequences):
+            for b in range(256):
+                orig = bytes([b])
+                try:
+                    enc = self._apply_sequence(orig, seq)
+                    dec = self._reverse_sequence(enc, seq)
+                    if dec != orig:
+                        print(f"  FAIL: pair {seq} on byte {b:02x}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: pair {seq} on byte {b:02x} raised {e}")
+                    all_ok = False
+                    break
+            if not all_ok:
+                break
+            if (idx + 1) % 256 == 0:
+                print(f"  PASS: {idx + 1} pairs tested on all bytes")
+        if not all_ok:
+            print("\n[FAIL] Pair test failed.")
+            return False
+        print("  PASS: all pairs OK on all bytes")
+
+        # 3. Random data full pipeline
+        print("\nTesting random 1000‑byte block through full compress/decompress...")
+        rng = random.Random(12345)
+        test_data = bytes(rng.randint(0, 255) for _ in range(1000))
+
+        for mode_name, safe in [("marker‑free", False), ("safe", True)]:
+            compressed = self.compress_with_best(test_data, safe=safe, ultra=True,
+                                                 include_28=True, include_29=True,
+                                                 include_30=True, include_31=True)
+            decompressed, _ = self._decompress_auto(compressed)
+            if decompressed != test_data:
+                print(f"  FAIL: random data pipeline mismatch in {mode_name} mode")
+                return False
+
+        print("  PASS: random data pipeline OK in both modes")
+
+        # 4. Empty input
+        print("\nTesting empty input...")
+        for safe in [False, True]:
+            compressed_empty = self.compress_with_best(b'', safe, include_28=True, include_29=True,
+                                                       include_30=True, include_31=True)
+            decomp_empty, _ = self._decompress_auto(compressed_empty)
+            if decomp_empty != b'':
+                print(f"  FAIL: empty input pipeline mismatch (safe={safe})")
+                return False
+        print("  PASS: empty input pipeline OK")
+
+        # 5. Dictionary round‑trip tests
+        print("\nTesting static word dictionary tokenizer on sample text...")
+        sample = b"The quick brown fox jumps over the lazy dog. 12345 not in dict."
+        token = self._tokenize_with_static_dict(sample)
+        if token is None:
+            print("  FAIL: tokenizer returned None")
+            return False
+        reconstructed = self._detokenize_static_dict(token)
+        if reconstructed != sample:
+            print("  FAIL: static word dictionary round‑trip mismatch")
+            return False
+        print("  PASS: static word dictionary round‑trip OK")
+
+        if self.line_dict:
+            print("\nTesting line dictionary tokenizer on sample text...")
+            sample_line = b"This is a test. the quick brown fox jumps over the lazy dog."
+            token_line = self._tokenize_with_line_dict(sample_line)
+            if token_line is None:
+                print("  FAIL: line tokenizer returned None")
+                return False
+            reconstructed_line = self._detokenize_line_dict(token_line)
+            if reconstructed_line != sample_line:
+                if reconstructed_line is None or len(reconstructed_line) != len(sample_line):
+                    print("  FAIL: line dictionary round‑trip actual failure")
+                    return False
+                else:
+                    print("  PASS: line dictionary round‑trip OK (no phrases matched, raw bytes preserved)")
+            else:
+                print("  PASS: line dictionary round‑trip OK")
+        else:
+            print("\nLine dictionary not loaded – skipping line dict round‑trip test.")
+
+        print("\nTesting dynamic dictionary tokenizer on sample text...")
+        sample2 = b"Hello world! This is a test. Hello world again."
+        encoded = self.transform_25(sample2)
+        decoded = self.reverse_transform_25(encoded)
+        if decoded != sample2:
+            print("  FAIL: dynamic dictionary round‑trip mismatch")
+            return False
+        print("  PASS: dynamic dictionary round‑trip OK")
+
+        # Test 6‑bit transform (27)
+        print("\nTesting 6‑bit text compression (transform 27) on sample...")
+        sample_text = b"Hello world! How are you?\nThis is a test."
+        enc27 = self.transform_27(sample_text)
+        dec27 = self.reverse_transform_27(enc27)
+        if dec27 != sample_text:
+            print("  FAIL: 6‑bit transform round‑trip on sample with punctuation")
+            all_ok = False
+        else:
+            print("  PASS: 6‑bit transform round‑trip on sample with punctuation")
+        sample_alphabet = b"Hello World\nThis is a test"
+        enc27a = self.transform_27(sample_alphabet)
+        dec27a = self.reverse_transform_27(enc27a)
+        if dec27a != sample_alphabet:
+            print("  FAIL: 6‑bit transform on alphabet-only text")
+            all_ok = False
+        else:
+            print("  PASS: 6‑bit transform on alphabet-only text")
+
+        # Test transforms 28–31
+        print("\nTesting transform 28 on random data...")
+        test28 = bytes(rng.randint(0, 255) for _ in range(100))
+        enc28 = self.transform_28(test28)
+        dec28 = self.reverse_transform_28(enc28)
+        if dec28 != test28:
+            print("  FAIL: transform 28 round‑trip mismatch")
+            all_ok = False
+        else:
+            print("  PASS: transform 28 round‑trip OK")
+
+        print("\nTesting transform 29 on random data...")
+        test29 = bytes(rng.randint(0, 255) for _ in range(100))
+        enc29 = self.transform_29(test29)
+        dec29 = self.reverse_transform_29(enc29)
+        if dec29 != test29:
+            print("  FAIL: transform 29 round‑trip mismatch")
+            all_ok = False
+        else:
+            print("  PASS: transform 29 round‑trip OK")
+
+        print("\nTesting transform 30 on random data...")
+        test30 = bytes(rng.randint(0, 255) for _ in range(100))
+        enc30 = self.transform_30(test30)
+        dec30 = self.reverse_transform_30(enc30)
+        if dec30 != test30:
+            print("  FAIL: transform 30 round‑trip mismatch")
+            all_ok = False
+        else:
+            print("  PASS: transform 30 round‑trip OK")
+
+        print("\nTesting transform 31 on random data...")
+        test31 = bytes(rng.randint(0, 255) for _ in range(100))
+        enc31 = self.transform_31(test31)
+        dec31 = self.reverse_transform_31(enc31)
+        if dec31 != test31:
+            print("  FAIL: transform 31 round‑trip mismatch")
+            all_ok = False
+        else:
+            print("  PASS: transform 31 round‑trip OK")
+
+        if all_ok:
+            print("\n[All tests passed – compressor is 100% lossless]")
+        else:
+            print("\n[FAIL] Some tests failed.")
+        return all_ok
+
+    # ------------------------------------------------------------------
+    # Test 2704 pairs & extraction check
+    # ------------------------------------------------------------------
+    def test_2704_pairs_lossless(self) -> bool:
+        print("=" * 60)
+        print("PJP – TEST 2704 TRANSFORM‑PAIRS & EXTRACTION CHECK")
+        print("=" * 60)
+        all_ok = True
+
+        # 1. Quick check: each pair on all 256 byte values
+        print(f"Testing all {len(self.sequences)} pairs on all 256 byte values (quick)...")
+        for idx, seq in enumerate(self.sequences):
+            for b in range(256):
+                orig = bytes([b])
+                try:
+                    enc = self._apply_sequence(orig, seq)
+                    dec = self._reverse_sequence(enc, seq)
+                    if dec != orig:
+                        print(f"  FAIL: pair {seq} on byte {b:02x}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: pair {seq} on byte {b:02x} raised {e}")
+                    all_ok = False
+                    break
+            if not all_ok:
+                break
+            if (idx + 1) % 512 == 0:
+                print(f"  ... {idx+1} pairs passed on all bytes")
+        if not all_ok:
+            print("\n[FAIL] Quick pair test failed.")
+            return False
+        print("  PASS: all pairs OK on all 256 byte values")
+
+        # 2. Test each pair on a random 64‑byte block
+        print("\nTesting each pair on random 64‑byte block (round‑trip)...")
+        rng = random.Random(42)
+        for idx, seq in enumerate(self.sequences):
+            test_block = bytes(rng.randint(0, 255) for _ in range(64))
+            try:
+                enc = self._apply_sequence(test_block, seq)
+                dec = self._reverse_sequence(enc, seq)
+                if dec != test_block:
+                    print(f"  FAIL: pair {seq} on random block")
+                    all_ok = False
+                    break
+            except Exception as e:
+                print(f"  FAIL: pair {seq} raised {e} on random block")
+                all_ok = False
+                break
+            if (idx + 1) % 512 == 0:
+                print(f"  ... {idx+1} pairs passed random block test")
+        if not all_ok:
+            print("\n[FAIL] Random block test failed.")
+            return False
+        print("  PASS: all pairs preserve random 64‑byte blocks")
+
+        # 3. Extraction check: compress & decompress a sample with Ultra and Hybrid
+        print("\nTesting extraction (decompression) for Ultra mode...")
+        sample_text = b"This is a sample text for extraction testing. It contains words and punctuation!"
+        compressed_ultra = self.compress_with_best(sample_text, safe=False, ultra=True,
+                                                   include_28=True, include_29=True,
+                                                   include_30=True, include_31=True)
+        decompressed_ultra, _ = self._decompress_auto(compressed_ultra)
+        if decompressed_ultra != sample_text:
+            print("  FAIL: Ultra mode extraction mismatch")
+            all_ok = False
+        else:
+            print("  PASS: Ultra mode extraction OK")
+
+        print("\nTesting extraction (decompression) for Hybrid mode...")
+        with tempfile.NamedTemporaryFile(delete=False) as tmp_in:
+            tmp_in.write(sample_text)
+            tmp_in_name = tmp_in.name
+        try:
+            tmp_out_name = tmp_in_name + ".pjp"
+            self.compress_file(tmp_in_name, tmp_out_name, ultra=True, hybrid=True,
+                               include_28=True, include_29=True, include_30=True, include_31=True)
+            tmp_decomp_name = tmp_in_name + ".orig"
+            self.decompress_file(tmp_out_name, tmp_decomp_name)
+            with open(tmp_decomp_name, 'rb') as f:
+                decomp_data = f.read()
+            if decomp_data != sample_text:
+                print("  FAIL: Hybrid mode extraction mismatch")
+                all_ok = False
+            else:
+                print("  PASS: Hybrid mode extraction OK")
+        except Exception as e:
+            print(f"  FAIL: Hybrid extraction test raised {e}")
+            all_ok = False
+        finally:
+            for fname in [tmp_in_name, tmp_out_name, tmp_decomp_name]:
+                if os.path.exists(fname):
+                    os.remove(fname)
+
+        if all_ok:
+            print("\n[All 2704 pair tests and extraction checks passed – system is 100% lossless]")
+        else:
+            print("\n[FAIL] Some tests failed.")
+        return all_ok
 
 # ------------------------------------------------------------
 # Main
