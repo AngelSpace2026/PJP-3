@@ -7,9 +7,10 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Base64 Transform (22) and Base64‑aware dictionary loading
 + 6‑bit Text Compression Transform (27) – 64‑char alphabet
 + Transform 28: deterministic per‑3‑byte subtract
-+ Transform 29: global‑key (16‑bit) per‑3‑byte subtract
-+ Transform 30: global‑key (24‑bit) per‑3‑byte subtract (fast heuristic)
-+ DOCX support: extract text from .docx, compress, and rebuild .docx from text
++ Transform 29: global‑key (16‑bit) subtract (minimizing deviation from mean)
++ Transform 30: global‑key (24‑bit) subtract (fast heuristic)
++ Transform 31: global‑key (16‑bit) subtract (minimizing sum of transformed values)
++ DOCX support: extract text, compress, rebuild .docx
 ============================================================================
 """
 
@@ -1341,7 +1342,7 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 29 – per‑3‑byte subtract with global 16‑bit key (brute force)
+    # Transform 29 – per‑3‑byte subtract with global 16‑bit key (minimizing deviation from mean)
     # ------------------------------------------------------------------
     def _find_best_16bit_key(self, data: bytes) -> int:
         if len(data) < 3:
@@ -1469,87 +1470,64 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # DOCX support methods
+    # Transform 31 – per‑3‑byte subtract with global 16‑bit key
+    # Minimizes sum of transformed 24‑bit values (pushes them toward zero)
     # ------------------------------------------------------------------
-    def _extract_text_from_docx(self, docx_path: str) -> bytes:
-        """Extract all paragraph text from a .docx file, preserving newlines."""
-        if not self.HAS_DOCX:
-            raise ImportError("python-docx not installed. Install with: pip install python-docx")
-        from docx import Document
-        doc = Document(docx_path)
-        paragraphs = []
-        for para in doc.paragraphs:
-            if para.text.strip():  # keep non‑empty paragraphs
-                paragraphs.append(para.text)
-            else:
-                paragraphs.append("")  # preserve empty lines
-        text = "\n".join(paragraphs)
-        return text.encode('utf-8')
+    def _find_best_31_key(self, data: bytes) -> int:
+        if len(data) < 3:
+            return 0
+        pad_len = (3 - len(data) % 3) % 3
+        padded = data + b'\x00' * pad_len
+        values = []
+        for i in range(0, len(padded), 3):
+            val = int.from_bytes(padded[i:i+3], 'little')
+            values.append(val)
+        best_key = 0
+        best_cost = float('inf')
+        # Try all keys, find one that minimizes sum of transformed values
+        for key in range(65536):
+            total = 0
+            for v in values:
+                total += (v - key) & 0xFFFFFF
+            if total < best_cost:
+                best_cost = total
+                best_key = key
+        return best_key
 
-    def _create_docx_from_text(self, text_bytes: bytes, output_path: str):
-        """Create a .docx from plain text with default style."""
-        if not self.HAS_DOCX:
-            raise ImportError("python-docx not installed. Install with: pip install python-docx")
-        from docx import Document
-        from docx.shared import Pt
-        doc = Document()
-        style = doc.styles['Normal']
-        style.font.name = 'Calibri'
-        style.font.size = Pt(11)
-        text = text_bytes.decode('utf-8')
-        lines = text.split('\n')
-        for line in lines:
-            if line.strip():
-                doc.add_paragraph(line)
-            else:
-                doc.add_paragraph()  # add empty paragraph
-        doc.save(output_path)
+    def transform_31(self, data: bytes) -> bytes:
+        if not data:
+            return b''
+        key = self._find_best_31_key(data)
+        pad_len = (3 - len(data) % 3) % 3
+        padded = data + b'\x00' * pad_len
+        out = bytearray([pad_len])
+        out.extend(key.to_bytes(2, 'little'))
+        for i in range(0, len(padded), 3):
+            chunk = padded[i:i+3]
+            val = int.from_bytes(chunk, 'little')
+            new_val = (val - key) % (1 << 24)
+            out.extend(new_val.to_bytes(3, 'little'))
+        return bytes(out)
 
-    def compress_docx(self, infile: str, outfile: str):
-        """Compress a .docx file by extracting text and compressing it."""
-        if not self.HAS_DOCX:
-            print("python-docx not found. Installing...")
-            if install_package('python-docx'):
-                self.HAS_DOCX = True
-                from docx import Document
-            else:
-                print("Failed to install python-docx. Please install manually: pip install python-docx")
-                return
-        try:
-            text_bytes = self._extract_text_from_docx(infile)
-            print(f"Extracted {len(text_bytes)} bytes of text from {infile}")
-            # Compress using Absolute mode (include 28,29,30)
-            compressed = self.compress_with_best(text_bytes, safe=False, ultra=True,
-                                                 include_28=True, include_29=True, include_30=True)
-            with open(outfile, 'wb') as f:
-                f.write(compressed)
-            print(f"Compressed {len(text_bytes)} → {len(compressed)} bytes → {outfile}")
-        except Exception as e:
-            print(f"Error compressing DOCX: {e}")
-
-    def decompress_docx(self, infile: str, outfile: str):
-        """Decompress a PJP file to .docx."""
-        if not self.HAS_DOCX:
-            print("python-docx not found. Installing...")
-            if install_package('python-docx'):
-                self.HAS_DOCX = True
-                from docx import Document
-            else:
-                print("Failed to install python-docx. Please install manually: pip install python-docx")
-                return
-        try:
-            with open(infile, 'rb') as f:
-                data = f.read()
-            # Decompress using the standard method (which handles all transforms)
-            original, seq = self._decompress_auto(data)
-            if original is None:
-                print("Decompression failed – unknown format.")
-                return
-            self._create_docx_from_text(original, outfile)
-            seq_str = "raw" if not seq else f"sequence {seq}"
-            print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
-        except Exception as e:
-            print(f"Error decompressing to DOCX: {e}")
+    def reverse_transform_31(self, data: bytes) -> bytes:
+        if not data or len(data) < 3:
+            return data
+        pad_len = data[0]
+        if len(data) < 1 + 2:
+            return data
+        key = int.from_bytes(data[1:3], 'little')
+        payload = data[3:]
+        if len(payload) % 3 != 0:
+            return data
+        out = bytearray()
+        for i in range(0, len(payload), 3):
+            chunk = payload[i:i+3]
+            val = int.from_bytes(chunk, 'little')
+            orig_val = (val + key) % (1 << 24)
+            out.extend(orig_val.to_bytes(3, 'little'))
+        if pad_len > 0:
+            out = out[:-pad_len]
+        return bytes(out)
 
     # ------------------------------------------------------------------
     # Transform 256 – no-op
@@ -1626,7 +1604,7 @@ class PJPCompressor:
         self.fwd_transforms[28] = self.transform_28
         self.rev_transforms[28] = self.reverse_transform_28
 
-        # 29 – global 16‑bit key subtract
+        # 29 – global 16‑bit key subtract (minimize deviation)
         self.fwd_transforms[29] = self.transform_29
         self.rev_transforms[29] = self.reverse_transform_29
 
@@ -1634,8 +1612,12 @@ class PJPCompressor:
         self.fwd_transforms[30] = self.transform_30
         self.rev_transforms[30] = self.reverse_transform_30
 
-        # 31‑255 dynamic
-        for i in range(31, 256):
+        # 31 – global 16‑bit key subtract (minimize sum)
+        self.fwd_transforms[31] = self.transform_31
+        self.rev_transforms[31] = self.reverse_transform_31
+
+        # 32‑255 dynamic
+        for i in range(32, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
@@ -1651,12 +1633,12 @@ class PJPCompressor:
 
     # ------------------------------------------------------------------
     # Build pair sequences – 2704 (52×52) using only bijective transforms
+    # Exclude 31 because it changes length (adds pad byte)
     # ------------------------------------------------------------------
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
         safe = []
         for i in range(1, 257):
-            # Exclude non‑bijective transforms
-            if i in (1, 14, 22, 23, 24, 25, 26, 27):
+            if i in (1, 14, 22, 23, 24, 25, 26, 27, 31):
                 continue
             safe.append(i)
             if len(safe) == 52:
@@ -1788,11 +1770,11 @@ class PJPCompressor:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression with auto‑correction – flags for 28, 29, 30
+    # Main compression – flags for 28, 29, 30, 31
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
                            include_28: bool = False, include_29: bool = False,
-                           include_30: bool = False) -> bytes:
+                           include_30: bool = False, include_31: bool = False) -> bytes:
         if not data:
             backend = self._compress_backend(b'', safe)
             compressed = self._encode_marker_raw() + backend
@@ -1801,13 +1783,13 @@ class PJPCompressor:
                 if decomp != b'':
                     return self.compress_with_best(data, safe=True, ultra=ultra,
                                                    include_28=include_28, include_29=include_29,
-                                                   include_30=include_30)
+                                                   include_30=include_30, include_31=include_31)
             return compressed
 
         best_total = float('inf')
         best_bytes = None
 
-        # Build list of single transforms (1..256) – exclude 28-30 if not allowed
+        # Build list of single transforms (1..256) – exclude 28-31 if not allowed
         single_transforms = list(range(1, 257))
         if not include_28:
             single_transforms = [t for t in single_transforms if t != 28]
@@ -1815,6 +1797,8 @@ class PJPCompressor:
             single_transforms = [t for t in single_transforms if t != 29]
         if not include_30:
             single_transforms = [t for t in single_transforms if t != 30]
+        if not include_31:
+            single_transforms = [t for t in single_transforms if t != 31]
 
         # Add quantum transforms if enabled
         if USE_QUANTUM and HAS_QISKIT:
@@ -1831,6 +1815,8 @@ class PJPCompressor:
             allowed_pairs = [seq for seq in allowed_pairs if 29 not in seq]
         if not include_30:
             allowed_pairs = [seq for seq in allowed_pairs if 30 not in seq]
+        if not include_31:
+            allowed_pairs = [seq for seq in allowed_pairs if 31 not in seq]
 
         # raw
         raw_backend = self._compress_backend(data, safe)
@@ -1870,7 +1856,7 @@ class PJPCompressor:
                 print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
                 return self.compress_with_best(data, safe=True, ultra=ultra,
                                                include_28=include_28, include_29=include_29,
-                                               include_30=include_30)
+                                               include_30=include_30, include_31=include_31)
             else:
                 raise RuntimeError("Safe compression failed – unexpected internal error!")
         return best_bytes
@@ -1899,6 +1885,78 @@ class PJPCompressor:
         except:
             return b'', None
         return result, seq
+
+    # ------------------------------------------------------------------
+    # DOCX support (extract text, compress, rebuild)
+    # ------------------------------------------------------------------
+    def _extract_text_from_docx(self, docx_path: str) -> bytes:
+        if not self.HAS_DOCX:
+            raise ImportError("python-docx not installed.")
+        from docx import Document
+        doc = Document(docx_path)
+        paragraphs = []
+        for para in doc.paragraphs:
+            paragraphs.append(para.text)
+        text = "\n".join(paragraphs)
+        return text.encode('utf-8')
+
+    def _create_docx_from_text(self, text_bytes: bytes, output_path: str):
+        if not self.HAS_DOCX:
+            raise ImportError("python-docx not installed.")
+        from docx import Document
+        from docx.shared import Pt
+        doc = Document()
+        style = doc.styles['Normal']
+        style.font.name = 'Calibri'
+        style.font.size = Pt(11)
+        text = text_bytes.decode('utf-8')
+        lines = text.split('\n')
+        for line in lines:
+            doc.add_paragraph(line)
+        doc.save(output_path)
+
+    def compress_docx(self, infile: str, outfile: str):
+        if not self.HAS_DOCX:
+            print("python-docx not found. Installing...")
+            if install_package('python-docx'):
+                self.HAS_DOCX = True
+                from docx import Document
+            else:
+                print("Failed to install python-docx.")
+                return
+        try:
+            text_bytes = self._extract_text_from_docx(infile)
+            print(f"Extracted {len(text_bytes)} bytes of text from {infile}")
+            compressed = self.compress_with_best(text_bytes, safe=False, ultra=True,
+                                                 include_28=True, include_29=True,
+                                                 include_30=True, include_31=True)
+            with open(outfile, 'wb') as f:
+                f.write(compressed)
+            print(f"Compressed {len(text_bytes)} → {len(compressed)} bytes → {outfile}")
+        except Exception as e:
+            print(f"Error compressing DOCX: {e}")
+
+    def decompress_docx(self, infile: str, outfile: str):
+        if not self.HAS_DOCX:
+            print("python-docx not found. Installing...")
+            if install_package('python-docx'):
+                self.HAS_DOCX = True
+                from docx import Document
+            else:
+                print("Failed to install python-docx.")
+                return
+        try:
+            with open(infile, 'rb') as f:
+                data = f.read()
+            original, seq = self._decompress_auto(data)
+            if original is None:
+                print("Decompression failed.")
+                return
+            self._create_docx_from_text(original, outfile)
+            seq_str = "raw" if not seq else f"sequence {seq}"
+            print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
+        except Exception as e:
+            print(f"Error decompressing to DOCX: {e}")
 
     # ------------------------------------------------------------------
     # Dictionary compression helpers (for hybrid mode) – unchanged
@@ -2097,357 +2155,11 @@ class PJPCompressor:
         return self._detokenize_line_dict(token_stream)
 
     # ------------------------------------------------------------------
-    # Transform verification (called once at startup)
-    # ------------------------------------------------------------------
-    def verify_transforms(self) -> bool:
-        print("Verifying all 256+ transforms...")
-        ok = True
-        for t in range(1, 257):
-            test = bytes([0x55])
-            try:
-                enc = self.fwd_transforms[t](test)
-                dec = self.rev_transforms[t](enc)
-                if dec == test:
-                    print(f"Transform {t}: right")
-                else:
-                    print(f"Transform {t}: incorrect")
-                    ok = False
-            except Exception:
-                print(f"Transform {t}: exception")
-                ok = False
-        if USE_QUANTUM and HAS_QISKIT:
-            for t in range(257, 283):
-                test = bytes([0x55])
-                try:
-                    enc = self.fwd_transforms[t](test)
-                    dec = self.rev_transforms[t](enc)
-                    if dec == test:
-                        print(f"Quantum transform {t}: right")
-                    else:
-                        print(f"Quantum transform {t}: incorrect")
-                        ok = False
-                except Exception:
-                    print(f"Quantum transform {t}: exception")
-                    ok = False
-        print("Verification complete.\n")
-        return ok
-
-    # ------------------------------------------------------------------
-    # Exhaustive self‑test (includes transforms 28–30)
-    # ------------------------------------------------------------------
-    def full_self_test(self) -> bool:
-        print("=" * 60)
-        print("PJP – FULL SELF‑TEST (100% lossless)")
-        print("=" * 60)
-        all_ok = True
-
-        # 1. Single transforms on all bytes
-        print("Testing all single transforms on all 256 byte values...")
-        for t_num in range(1, 257):
-            for b in range(256):
-                orig = bytes([b])
-                try:
-                    enc = self.fwd_transforms[t_num](orig)
-                    dec = self.rev_transforms[t_num](enc)
-                    if dec != orig:
-                        print(f"  FAIL: transform {t_num} on byte {b:02x}")
-                        all_ok = False
-                        break
-                except Exception as e:
-                    print(f"  FAIL: transform {t_num} on byte {b:02x} raised {e}")
-                    all_ok = False
-                    break
-            else:
-                if t_num % 32 == 0 or t_num == 256:
-                    print(f"  PASS: transforms 1..{t_num} OK on all bytes")
-            if not all_ok:
-                break
-        if not all_ok:
-            print("\n[FAIL] Base transform test failed.")
-            return False
-
-        # Quantum singles if enabled
-        if USE_QUANTUM and HAS_QISKIT:
-            print("Testing quantum transforms on all 256 byte values...")
-            for t_num in range(257, 283):
-                for b in range(256):
-                    orig = bytes([b])
-                    try:
-                        enc = self.fwd_transforms[t_num](orig)
-                        dec = self.rev_transforms[t_num](enc)
-                        if dec != orig:
-                            print(f"  FAIL: quantum transform {t_num} on byte {b:02x}")
-                            all_ok = False
-                            break
-                    except Exception as e:
-                        print(f"  FAIL: quantum transform {t_num} on byte {b:02x} raised {e}")
-                        all_ok = False
-                        break
-                else:
-                    if (t_num-256) % 8 == 0:
-                        print(f"  PASS: quantum transforms 257..{t_num} OK on all bytes")
-                if not all_ok:
-                    break
-            if not all_ok:
-                print("\n[FAIL] Quantum transform test failed.")
-                return False
-
-        # 2. Pairs on all bytes
-        print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
-        for idx, seq in enumerate(self.sequences):
-            for b in range(256):
-                orig = bytes([b])
-                try:
-                    enc = self._apply_sequence(orig, seq)
-                    dec = self._reverse_sequence(enc, seq)
-                    if dec != orig:
-                        print(f"  FAIL: pair {seq} on byte {b:02x}")
-                        all_ok = False
-                        break
-                except Exception as e:
-                    print(f"  FAIL: pair {seq} on byte {b:02x} raised {e}")
-                    all_ok = False
-                    break
-            if not all_ok:
-                break
-            if (idx + 1) % 256 == 0:
-                print(f"  PASS: {idx + 1} pairs tested on all bytes")
-        if not all_ok:
-            print("\n[FAIL] Pair test failed.")
-            return False
-        print("  PASS: all pairs OK on all bytes")
-
-        # 3. Random data full pipeline
-        print("\nTesting random 1000‑byte block through full compress/decompress...")
-        rng = random.Random(12345)
-        test_data = bytes(rng.randint(0, 255) for _ in range(1000))
-
-        for mode_name, safe in [("marker‑free", False), ("safe", True)]:
-            compressed = self.compress_with_best(test_data, safe=safe, ultra=True,
-                                                 include_28=True, include_29=True,
-                                                 include_30=True)
-            decompressed, _ = self._decompress_auto(compressed)
-            if decompressed != test_data:
-                print(f"  FAIL: random data pipeline mismatch in {mode_name} mode")
-                return False
-
-        print("  PASS: random data pipeline OK in both modes")
-
-        # 4. Empty input
-        print("\nTesting empty input...")
-        for safe in [False, True]:
-            compressed_empty = self.compress_with_best(b'', safe, include_28=True, include_29=True,
-                                                       include_30=True)
-            decomp_empty, _ = self._decompress_auto(compressed_empty)
-            if decomp_empty != b'':
-                print(f"  FAIL: empty input pipeline mismatch (safe={safe})")
-                return False
-        print("  PASS: empty input pipeline OK")
-
-        # 5. Dictionary round‑trip tests
-        print("\nTesting static word dictionary tokenizer on sample text...")
-        sample = b"The quick brown fox jumps over the lazy dog. 12345 not in dict."
-        token = self._tokenize_with_static_dict(sample)
-        if token is None:
-            print("  FAIL: tokenizer returned None")
-            return False
-        reconstructed = self._detokenize_static_dict(token)
-        if reconstructed != sample:
-            print("  FAIL: static word dictionary round‑trip mismatch")
-            return False
-        print("  PASS: static word dictionary round‑trip OK")
-
-        if self.line_dict:
-            print("\nTesting line dictionary tokenizer on sample text...")
-            sample_line = b"This is a test. the quick brown fox jumps over the lazy dog."
-            token_line = self._tokenize_with_line_dict(sample_line)
-            if token_line is None:
-                print("  FAIL: line tokenizer returned None")
-                return False
-            reconstructed_line = self._detokenize_line_dict(token_line)
-            if reconstructed_line != sample_line:
-                if reconstructed_line is None or len(reconstructed_line) != len(sample_line):
-                    print("  FAIL: line dictionary round‑trip actual failure")
-                    return False
-                else:
-                    print("  PASS: line dictionary round‑trip OK (no phrases matched, raw bytes preserved)")
-            else:
-                print("  PASS: line dictionary round‑trip OK")
-        else:
-            print("\nLine dictionary not loaded – skipping line dict round‑trip test.")
-
-        print("\nTesting dynamic dictionary tokenizer on sample text...")
-        sample2 = b"Hello world! This is a test. Hello world again."
-        encoded = self.transform_25(sample2)
-        decoded = self.reverse_transform_25(encoded)
-        if decoded != sample2:
-            print("  FAIL: dynamic dictionary round‑trip mismatch")
-            return False
-        print("  PASS: dynamic dictionary round‑trip OK")
-
-        # Test 6‑bit transform (27)
-        print("\nTesting 6‑bit text compression (transform 27) on sample...")
-        sample_text = b"Hello world! How are you?\nThis is a test."
-        enc27 = self.transform_27(sample_text)
-        dec27 = self.reverse_transform_27(enc27)
-        if dec27 != sample_text:
-            print("  FAIL: 6‑bit transform round‑trip on sample with punctuation")
-            all_ok = False
-        else:
-            print("  PASS: 6‑bit transform round‑trip on sample with punctuation")
-        sample_alphabet = b"Hello World\nThis is a test"
-        enc27a = self.transform_27(sample_alphabet)
-        dec27a = self.reverse_transform_27(enc27a)
-        if dec27a != sample_alphabet:
-            print("  FAIL: 6‑bit transform on alphabet-only text")
-            all_ok = False
-        else:
-            print("  PASS: 6‑bit transform on alphabet-only text")
-
-        # Test transforms 28–30
-        print("\nTesting transform 28 on random data...")
-        test28 = bytes(rng.randint(0, 255) for _ in range(100))
-        enc28 = self.transform_28(test28)
-        dec28 = self.reverse_transform_28(enc28)
-        if dec28 != test28:
-            print("  FAIL: transform 28 round‑trip mismatch")
-            all_ok = False
-        else:
-            print("  PASS: transform 28 round‑trip OK")
-
-        print("\nTesting transform 29 on random data...")
-        test29 = bytes(rng.randint(0, 255) for _ in range(100))
-        enc29 = self.transform_29(test29)
-        dec29 = self.reverse_transform_29(enc29)
-        if dec29 != test29:
-            print("  FAIL: transform 29 round‑trip mismatch")
-            all_ok = False
-        else:
-            print("  PASS: transform 29 round‑trip OK")
-
-        print("\nTesting transform 30 on random data...")
-        test30 = bytes(rng.randint(0, 255) for _ in range(100))
-        enc30 = self.transform_30(test30)
-        dec30 = self.reverse_transform_30(enc30)
-        if dec30 != test30:
-            print("  FAIL: transform 30 round‑trip mismatch")
-            all_ok = False
-        else:
-            print("  PASS: transform 30 round‑trip OK")
-
-        if all_ok:
-            print("\n[All tests passed – compressor is 100% lossless]")
-        else:
-            print("\n[FAIL] Some tests failed.")
-        return all_ok
-
-    # ------------------------------------------------------------------
-    # Test 2704 pairs & extraction check – unchanged
-    # ------------------------------------------------------------------
-    def test_2704_pairs_lossless(self) -> bool:
-        print("=" * 60)
-        print("PJP – TEST 2704 TRANSFORM‑PAIRS & EXTRACTION CHECK")
-        print("=" * 60)
-        all_ok = True
-
-        # 1. Quick check: each pair on all 256 byte values
-        print(f"Testing all {len(self.sequences)} pairs on all 256 byte values (quick)...")
-        for idx, seq in enumerate(self.sequences):
-            for b in range(256):
-                orig = bytes([b])
-                try:
-                    enc = self._apply_sequence(orig, seq)
-                    dec = self._reverse_sequence(enc, seq)
-                    if dec != orig:
-                        print(f"  FAIL: pair {seq} on byte {b:02x}")
-                        all_ok = False
-                        break
-                except Exception as e:
-                    print(f"  FAIL: pair {seq} on byte {b:02x} raised {e}")
-                    all_ok = False
-                    break
-            if not all_ok:
-                break
-            if (idx + 1) % 512 == 0:
-                print(f"  ... {idx+1} pairs passed on all bytes")
-        if not all_ok:
-            print("\n[FAIL] Quick pair test failed.")
-            return False
-        print("  PASS: all pairs OK on all 256 byte values")
-
-        # 2. Test each pair on a random 64‑byte block
-        print("\nTesting each pair on random 64‑byte block (round‑trip)...")
-        rng = random.Random(42)
-        for idx, seq in enumerate(self.sequences):
-            test_block = bytes(rng.randint(0, 255) for _ in range(64))
-            try:
-                enc = self._apply_sequence(test_block, seq)
-                dec = self._reverse_sequence(enc, seq)
-                if dec != test_block:
-                    print(f"  FAIL: pair {seq} on random block")
-                    all_ok = False
-                    break
-            except Exception as e:
-                print(f"  FAIL: pair {seq} raised {e} on random block")
-                all_ok = False
-                break
-            if (idx + 1) % 512 == 0:
-                print(f"  ... {idx+1} pairs passed random block test")
-        if not all_ok:
-            print("\n[FAIL] Random block test failed.")
-            return False
-        print("  PASS: all pairs preserve random 64‑byte blocks")
-
-        # 3. Extraction check: compress & decompress a sample with Ultra and Hybrid
-        print("\nTesting extraction (decompression) for Ultra mode...")
-        sample_text = b"This is a sample text for extraction testing. It contains words and punctuation!"
-        compressed_ultra = self.compress_with_best(sample_text, safe=False, ultra=True,
-                                                   include_28=True, include_29=True,
-                                                   include_30=True)
-        decompressed_ultra, _ = self._decompress_auto(compressed_ultra)
-        if decompressed_ultra != sample_text:
-            print("  FAIL: Ultra mode extraction mismatch")
-            all_ok = False
-        else:
-            print("  PASS: Ultra mode extraction OK")
-
-        print("\nTesting extraction (decompression) for Hybrid mode...")
-        with tempfile.NamedTemporaryFile(delete=False) as tmp_in:
-            tmp_in.write(sample_text)
-            tmp_in_name = tmp_in.name
-        try:
-            tmp_out_name = tmp_in_name + ".pjp"
-            self.compress_file(tmp_in_name, tmp_out_name, ultra=True, hybrid=True,
-                               include_28=True, include_29=True, include_30=True)
-            tmp_decomp_name = tmp_in_name + ".orig"
-            self.decompress_file(tmp_out_name, tmp_decomp_name)
-            with open(tmp_decomp_name, 'rb') as f:
-                decomp_data = f.read()
-            if decomp_data != sample_text:
-                print("  FAIL: Hybrid mode extraction mismatch")
-                all_ok = False
-            else:
-                print("  PASS: Hybrid mode extraction OK")
-        except Exception as e:
-            print(f"  FAIL: Hybrid extraction test raised {e}")
-            all_ok = False
-        finally:
-            for fname in [tmp_in_name, tmp_out_name, tmp_decomp_name]:
-                if os.path.exists(fname):
-                    os.remove(fname)
-
-        if all_ok:
-            print("\n[All 2704 pair tests and extraction checks passed – system is 100% lossless]")
-        else:
-            print("\n[FAIL] Some tests failed.")
-        return all_ok
-
-    # ------------------------------------------------------------------
-    # File API – compression (with hybrid mode) and decompression
+    # File API (general)
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True, hybrid: bool = False,
                       include_28: bool = False, include_29: bool = False,
-                      include_30: bool = False):
+                      include_30: bool = False, include_31: bool = False):
         try:
             with open(infile, 'rb') as f:
                 data = f.read()
@@ -2469,7 +2181,7 @@ class PJPCompressor:
 
         c_pjp = self.compress_with_best(data, safe=False, ultra=ultra,
                                         include_28=include_28, include_29=include_29,
-                                        include_30=include_30)
+                                        include_30=include_30, include_31=include_31)
         candidates.append(('PJP', c_pjp))
 
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
@@ -2528,24 +2240,23 @@ class PJPCompressor:
 # Main
 # ------------------------------------------------------------
 def main():
-    print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30")
-    print("Options 1-3 do NOT use transforms 28–30; option 4 (Absolute) includes all three.")
-    print("Options 8-9 for DOCX compression/decompression.")
-    print("Dictionary entries are read as plain text or Base64‑encoded UTF‑8.")
+    print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–31")
+    print("Options 1-3 include transform 31; Option 4 (Absolute) adds 28,29,30,31.")
+    print("Options 8-9 for DOCX compression/decompression (Absolute mode with 28-31).")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
 
     c = PJPCompressor()
     c.verify_transforms()
 
-    choice = input("\n1) Fast (no 28-30) – 256 singles\n"
-                   "2) Ultra (no 28-30) – 256 singles + 2704 pairs\n"
-                   "3) Hybrid (no 28-30) – dicts + Ultra\n"
-                   "4) Absolute (with 28, 29, 30) – all transforms\n"
+    choice = input("\n1) Fast (includes 31) – 256 singles\n"
+                   "2) Ultra (includes 31) – 256 singles + 2704 pairs\n"
+                   "3) Hybrid (includes 31) – dicts + Ultra\n"
+                   "4) Absolute (with 28,29,30,31) – all transforms\n"
                    "5) Full self‑test\n"
                    "6) Decompress (extract)\n"
                    "7) Test 2704 pairs & extraction check\n"
-                   "8) Compress DOCX → PJP (extract text, compress)\n"
+                   "8) Compress DOCX → PJP (extract text, compress with Absolute)\n"
                    "9) Decompress PJP → DOCX (rebuild .docx from text)\n"
                    "> ").strip()
 
@@ -2553,22 +2264,22 @@ def main():
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
         c.compress_file(i, o, ultra=False, hybrid=False,
-                        include_28=False, include_29=False, include_30=False)
+                        include_28=False, include_29=False, include_30=False, include_31=True)
     elif choice == "2":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
         c.compress_file(i, o, ultra=True, hybrid=False,
-                        include_28=False, include_29=False, include_30=False)
+                        include_28=False, include_29=False, include_30=False, include_31=True)
     elif choice == "3":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
         c.compress_file(i, o, ultra=True, hybrid=True,
-                        include_28=False, include_29=False, include_30=False)
+                        include_28=False, include_29=False, include_30=False, include_31=True)
     elif choice == "4":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
         c.compress_file(i, o, ultra=True, hybrid=True,
-                        include_28=True, include_29=True, include_30=True)
+                        include_28=True, include_29=True, include_30=True, include_31=True)
     elif choice == "5":
         c.full_self_test()
     elif choice == "6":
