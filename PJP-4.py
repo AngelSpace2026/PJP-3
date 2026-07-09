@@ -1525,7 +1525,7 @@ class PJPCompressor:
 
     # ------------------------------------------------------------------
     # Transform 31 – .docx paragraph extraction with dictionary compression
-    # FIX: removed extra out.extend(encoded_text) to avoid corruption
+    # FIX: length-prefixed runs to avoid sentinel conflicts
     # ------------------------------------------------------------------
     def transform_31(self, data: bytes) -> bytes:
         if not data or len(data) < 4 or data[:4] != b'PK\x03\x04':
@@ -1536,6 +1536,7 @@ class PJPCompressor:
             from docx.shared import Pt
             doc = Document(io.BytesIO(data))
         except ImportError:
+            # Fallback: XML only, no formatting
             try:
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
                     with zf.open('word/document.xml') as f:
@@ -1582,8 +1583,6 @@ class PJPCompressor:
                 out.extend(struct.pack('>H', len(wb)))
                 out.extend(wb)
 
-            # *** FIX: removed out.extend(encoded_text) – only runs are stored ***
-
             for para in doc.paragraphs:
                 for run in para.runs:
                     text = run.text
@@ -1599,9 +1598,10 @@ class PJPCompressor:
                     if run.font.strike: style |= 8
                     if run.font.superscript: style |= 16
                     if run.font.subscript: style |= 32
-                    out.append(0x05)
+                    out.append(0x05)                # run marker
                     out.append(size_val)
                     out.append(style)
+                    out.extend(struct.pack('>H', len(encoded_run)))  # length prefix
                     out.extend(encoded_run)
             return bytes(out)
 
@@ -1649,11 +1649,15 @@ class PJPCompressor:
                 pos += 1
                 style = data[pos]
                 pos += 1
-                run_data = bytearray()
-                while pos < len(data) and data[pos] != 0x05:
-                    run_data.append(data[pos])
-                    pos += 1
-                decoded_text = self._decode_text_with_dict(bytes(run_data), dictionary)
+                if pos + 2 > len(data):
+                    break
+                run_len = struct.unpack('>H', data[pos:pos+2])[0]
+                pos += 2
+                if pos + run_len > len(data):
+                    break
+                run_data = data[pos:pos+run_len]
+                pos += run_len
+                decoded_text = self._decode_text_with_dict(run_data, dictionary)
                 run = p.add_run(decoded_text)
                 run.font.size = Pt(size_val)
                 if style & 1: run.bold = True
@@ -1671,7 +1675,7 @@ class PJPCompressor:
 
     # ------------------------------------------------------------------
     # Transform 32 – .docx table extraction with dictionary compression
-    # (unchanged, but included for completeness)
+    # FIX: length-prefixed runs to avoid sentinel conflicts
     # ------------------------------------------------------------------
     def transform_32(self, data: bytes) -> bytes:
         if not data or len(data) < 4 or data[:4] != b'PK\x03\x04':
@@ -1714,10 +1718,6 @@ class PJPCompressor:
             out.append(cols)
             for row in table.rows:
                 for cell in row.cells:
-                    cell_text = cell.text
-                    if not cell_text:
-                        out.append(0x00)
-                        continue
                     for para in cell.paragraphs:
                         for run in para.runs:
                             if not run.text:
@@ -1735,8 +1735,9 @@ class PJPCompressor:
                             out.append(0x06)
                             out.append(size_val)
                             out.append(style)
+                            out.extend(struct.pack('>H', len(encoded_run)))
                             out.extend(encoded_run)
-                    out.append(0x00)
+                    out.append(0x00)   # end of cell
         return bytes(out)
 
     def reverse_transform_32(self, data: bytes) -> bytes:
@@ -1785,10 +1786,7 @@ class PJPCompressor:
                 for c in range(cols):
                     cell = table.cell(r, c)
                     p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
-                    while pos < len(data):
-                        if data[pos] == 0x00:
-                            pos += 1
-                            break
+                    while pos < len(data) and data[pos] != 0x00:
                         marker = data[pos]
                         pos += 1
                         if marker == 0x06:
@@ -1798,11 +1796,15 @@ class PJPCompressor:
                             pos += 1
                             style = data[pos]
                             pos += 1
-                            run_data = bytearray()
-                            while pos < len(data) and data[pos] not in (0x00, 0x06):
-                                run_data.append(data[pos])
-                                pos += 1
-                            decoded_text = self._decode_text_with_dict(bytes(run_data), dictionary)
+                            if pos + 2 > len(data):
+                                break
+                            run_len = struct.unpack('>H', data[pos:pos+2])[0]
+                            pos += 2
+                            if pos + run_len > len(data):
+                                break
+                            run_data = data[pos:pos+run_len]
+                            pos += run_len
+                            decoded_text = self._decode_text_with_dict(run_data, dictionary)
                             run = p.add_run(decoded_text)
                             run.font.size = Pt(size_val)
                             if style & 1: run.bold = True
@@ -1813,6 +1815,9 @@ class PJPCompressor:
                             if style & 32: run.font.subscript = True
                         else:
                             break
+                    # skip the 0x00 that ended the cell
+                    if pos < len(data) and data[pos] == 0x00:
+                        pos += 1
         bio = io.BytesIO()
         doc.save(bio)
         return bio.getvalue()
