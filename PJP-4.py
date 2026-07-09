@@ -7,8 +7,9 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Base64 Transform (22) and Base64‑aware dictionary loading
 + 6‑bit Text Compression Transform (27)
 + Transforms 28–30 (per‑3‑byte subtract)
-+ Transform 31: .docx paragraphs (with dictionary compression)
-+ Transform 32: .docx tables (with dictionary compression)
++ Transform 31: .docx paragraphs (with dictionary compression, reversible)
++ Transform 32: .docx tables (with dictionary compression, reversible)
++ Transform 33: .docx -> plain text (lossy for .docx, lossless for text) – for compression only
 + Option 8: Extract plain text from .docx to .txt (no compression)
 ============================================================================
 """
@@ -1815,6 +1816,25 @@ class PJPCompressor:
         return bio.getvalue()
 
     # ------------------------------------------------------------------
+    # Transform 33 – .docx -> plain text (lossy for docx, lossless for text)
+    # ------------------------------------------------------------------
+    def transform_33(self, data: bytes) -> bytes:
+        """Extract plain text from .docx and return as UTF-8 encoded bytes."""
+        if not data or len(data) < 4 or data[:4] != b'PK\x03\x04':
+            # Not a .docx, return data as is (no-op)
+            return data
+
+        text = self.extract_text_from_docx(data)
+        if not text:
+            return b''  # empty text
+
+        return text.encode('utf-8')
+
+    def reverse_transform_33(self, data: bytes) -> bytes:
+        """Reverse of transform 33: identity (since we only produced text)."""
+        return data
+
+    # ------------------------------------------------------------------
     # NEW: Extract plain text from .docx (no compression, no formatting)
     # ------------------------------------------------------------------
     def extract_text_from_docx(self, data: bytes) -> str:
@@ -1881,7 +1901,7 @@ class PJPCompressor:
         return tf, tf
 
     # ------------------------------------------------------------------
-    # Build transform maps (include 31 and 32)
+    # Build transform maps (include 31, 32, 33)
     # ------------------------------------------------------------------
     def _build_transform_maps(self):
         self.fwd_transforms: Dict[int, Callable] = {}
@@ -1937,8 +1957,12 @@ class PJPCompressor:
         self.fwd_transforms[32] = self.transform_32
         self.rev_transforms[32] = self.reverse_transform_32
 
-        # 33‑255 dynamic
-        for i in range(33, 256):
+        # 33 – .docx -> plain text
+        self.fwd_transforms[33] = self.transform_33
+        self.rev_transforms[33] = self.reverse_transform_33
+
+        # 34‑255 dynamic
+        for i in range(34, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
@@ -1952,12 +1976,12 @@ class PJPCompressor:
                 raise RuntimeError(f"Transform {i} missing!")
 
     # ------------------------------------------------------------------
-    # Build pair sequences – exclude 1,14,22,23,24,25,26,27,31,32
+    # Build pair sequences – exclude 1,14,22,23,24,25,26,27,31,32,33
     # ------------------------------------------------------------------
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
         safe = []
         for i in range(1, 257):
-            if i in (1, 14, 22, 23, 24, 25, 26, 27, 31, 32):
+            if i in (1, 14, 22, 23, 24, 25, 26, 27, 31, 32, 33):
                 continue
             safe.append(i)
             if len(safe) == 52:
@@ -2128,7 +2152,7 @@ class PJPCompressor:
             allowed_pairs = [seq for seq in allowed_pairs if 29 not in seq]
         if not include_30:
             allowed_pairs = [seq for seq in allowed_pairs if 30 not in seq]
-        allowed_pairs = [seq for seq in allowed_pairs if 31 not in seq and 32 not in seq]
+        allowed_pairs = [seq for seq in allowed_pairs if 31 not in seq and 32 not in seq and 33 not in seq]
 
         raw_backend = self._compress_backend(data, safe)
         candidate = self._encode_marker_raw() + raw_backend
@@ -2394,12 +2418,15 @@ class PJPCompressor:
         return self._detokenize_line_dict(token_stream)
 
     # ------------------------------------------------------------------
-    # Verification & tests (unchanged, but we add quick test for 31 & 32)
+    # Verification & tests (update for transform 33)
     # ------------------------------------------------------------------
     def verify_transforms(self) -> bool:
         print("Verifying all 256+ transforms...")
         ok = True
+        # Skip transform 33 in verification because it's not bijective for arbitrary bytes
         for t in range(1, 257):
+            if t == 33:
+                continue  # Transform 33 is not bijective on all bytes
             test = bytes([0x55])
             try:
                 enc = self.fwd_transforms[t](test)
@@ -2435,7 +2462,7 @@ class PJPCompressor:
         print("=" * 60)
         all_ok = True
 
-        # Quick test for 31 & 32
+        # Quick test for 31 & 32 & 33
         try:
             from docx import Document
             from docx.shared import Pt
@@ -2473,8 +2500,23 @@ class PJPCompressor:
                 all_ok = False
             else:
                 print("  PASS: transform 32 round‑trip OK")
+
+            # Test 33: extract text, then reverse (identity) should yield same text
+            enc33 = self.transform_33(docx_bytes)
+            dec33 = self.reverse_transform_33(enc33)
+            if dec33 != enc33:
+                print("  FAIL: transform 33 reverse (identity) mismatch")
+                all_ok = False
+            else:
+                # Check that text is correct
+                if b"Hello World!" not in enc33:
+                    print("  FAIL: transform 33 did not extract text correctly")
+                    all_ok = False
+                else:
+                    print("  PASS: transform 33 text extraction OK")
+
         except ImportError:
-            print("  SKIP: python-docx not installed, cannot test transforms 31 & 32.")
+            print("  SKIP: python-docx not installed, cannot test transforms 31, 32, 33.")
 
         # Test dictionary encoding/decoding
         test_text = "Hello world hello world test test"
@@ -2500,7 +2542,8 @@ class PJPCompressor:
             all_ok = False
 
         if all_ok:
-            print("\n[All tests passed – compressor is 100% lossless]")
+            print("\n[All tests passed – compressor is 100% lossless (for reversible transforms)]")
+            print("Note: Transform 33 is lossy for .docx but lossless for the extracted text.")
         else:
             print("\n[FAIL] Some tests failed.")
         return all_ok
@@ -2595,7 +2638,7 @@ class PJPCompressor:
         print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
     # ------------------------------------------------------------------
-    # NEW: Extract plain text to a .txt file
+    # Extract plain text to a .txt file (Option 8)
     # ------------------------------------------------------------------
     def extract_to_txt(self, infile: str, outfile: str):
         try:
@@ -2619,7 +2662,7 @@ class PJPCompressor:
 # Main
 # ------------------------------------------------------------
 def main():
-    print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30 + Transform 31 (paragraphs with dict) + Transform 32 (tables with dict)")
+    print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30 + Transform 31 (paragraphs with dict) + Transform 32 (tables with dict) + Transform 33 (docx->txt extraction)")
     print("Options 1-3 do NOT use transforms 28–30; option 4 (Absolute) includes all three.")
     print("Dictionary entries are read as plain text or Base64‑encoded UTF‑8.")
     if paq is None and not HAS_ZSTD:
