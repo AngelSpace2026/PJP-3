@@ -1871,7 +1871,6 @@ class PJPCompressor:
             allowed_pairs = [seq for seq in allowed_pairs if 29 not in seq]
         if not include_30:
             allowed_pairs = [seq for seq in allowed_pairs if 30 not in seq]
-        # Also exclude 31 from pairs (already excluded in sequence build, but keep safety)
         allowed_pairs = [seq for seq in allowed_pairs if 31 not in seq]
 
         # raw
@@ -1906,6 +1905,7 @@ class PJPCompressor:
                 except:
                     continue
 
+        # Verify the chosen candidate
         decomp, _ = self._decompress_auto(best_bytes)
         if decomp != data:
             if not safe:
@@ -1914,7 +1914,10 @@ class PJPCompressor:
                                                include_28=include_28, include_29=include_29,
                                                include_30=include_30)
             else:
-                raise RuntimeError("Safe compression failed – unexpected internal error!")
+                # Safe mode also failed – store raw (no transforms)
+                print("Warning: safe compression with transforms failed; storing raw data.")
+                raw_backend = self._compress_backend(data, safe=True)
+                return self._encode_marker_raw() + raw_backend
         return best_bytes
 
     def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
