@@ -1593,9 +1593,10 @@ class PJPCompressor:
                     if run.bold: style |= 1
                     if run.italic: style |= 2
                     if run.underline: style |= 4
-                    if run.strike: style |= 8
-                    if run.superscript: style |= 16
-                    if run.subscript: style |= 32
+                    # Fixed: use run.font.strike, run.font.superscript, run.font.subscript
+                    if run.font.strike: style |= 8
+                    if run.font.superscript: style |= 16
+                    if run.font.subscript: style |= 32
                     out.append(0x05)
                     out.append(size_val)
                     out.append(style)
@@ -1656,9 +1657,10 @@ class PJPCompressor:
                 if style & 1: run.bold = True
                 if style & 2: run.italic = True
                 if style & 4: run.underline = True
-                if style & 8: run.strike = True
-                if style & 16: run.superscript = True
-                if style & 32: run.subscript = True
+                # Fixed: use run.font.strike, etc.
+                if style & 8: run.font.strike = True
+                if style & 16: run.font.superscript = True
+                if style & 32: run.font.subscript = True
             else:
                 break
 
@@ -1725,9 +1727,10 @@ class PJPCompressor:
                             if run.bold: style |= 1
                             if run.italic: style |= 2
                             if run.underline: style |= 4
-                            if run.strike: style |= 8
-                            if run.superscript: style |= 16
-                            if run.subscript: style |= 32
+                            # Fixed: use run.font.strike, etc.
+                            if run.font.strike: style |= 8
+                            if run.font.superscript: style |= 16
+                            if run.font.subscript: style |= 32
                             out.append(0x06)
                             out.append(size_val)
                             out.append(style)
@@ -1804,9 +1807,10 @@ class PJPCompressor:
                             if style & 1: run.bold = True
                             if style & 2: run.italic = True
                             if style & 4: run.underline = True
-                            if style & 8: run.strike = True
-                            if style & 16: run.superscript = True
-                            if style & 32: run.subscript = True
+                            # Fixed: use run.font.strike, etc.
+                            if style & 8: run.font.strike = True
+                            if style & 16: run.font.superscript = True
+                            if style & 32: run.font.subscript = True
                         else:
                             break
         bio = io.BytesIO()
