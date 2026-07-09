@@ -160,13 +160,26 @@ def download_and_merge_dictionaries():
         local_path = os.path.join(DICT_DIR, filename)
         print(f"Downloading {filename} to {DICT_DIR}/ ...")
         try:
+            # Google Drive may require a confirmation token; handle redirect.
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req) as response:
                 content = response.read()
-
-            if b'<html' in content[:200].lower():
-                print(f"  WARNING: {filename} appears to be an HTML page. Skipping.")
-                continue
+                # Check if we got a HTML confirmation page (common for large files)
+                if b'<html' in content[:200].lower() and b'confirm' in content[:2000].lower():
+                    # Try to extract the confirm token and follow it
+                    import re
+                    match = re.search(b'confirm=([^&]+)', content)
+                    if match:
+                        confirm_token = match.group(1).decode()
+                        new_url = f"https://drive.google.com/uc?export=download&confirm={confirm_token}&id={url.split('id=')[-1]}"
+                        with urllib.request.urlopen(new_url) as resp2:
+                            content = resp2.read()
+                    else:
+                        print(f"  WARNING: {filename} appears to be an HTML confirmation page; skipping.")
+                        continue
+                elif b'<html' in content[:200].lower():
+                    print(f"  WARNING: {filename} appears to be an HTML page. Skipping.")
+                    continue
 
             with open(local_path, 'wb') as f:
                 f.write(content)
@@ -1416,18 +1429,21 @@ class PJPCompressor:
         # 31‑32
         self.fwd_transforms[31] = self.transform_31; self.rev_transforms[31] = self.reverse_transform_31
         self.fwd_transforms[32] = self.transform_32; self.rev_transforms[32] = self.reverse_transform_32
-        # 33‑256 dynamic
-        for i in range(33, 257):
+        # 33‑255 dynamic
+        for i in range(33, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
+        # 256 no-op (explicitly set to avoid being overwritten)
+        self.fwd_transforms[256] = self.transform_256
+        self.rev_transforms[256] = self.reverse_transform_256
         # Quantum transforms (257‑282) will be added later if enabled.
         # New fast transforms 283‑512
         for i in range(283, 513):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
-        # 256 no‑op (already set)
+        # Ensure all 1‑512 are defined
         for i in range(1, 513):
             if i not in self.fwd_transforms:
                 raise RuntimeError(f"Transform {i} missing!")
