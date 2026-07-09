@@ -1593,7 +1593,7 @@ class PJPCompressor:
                     if run.bold: style |= 1
                     if run.italic: style |= 2
                     if run.underline: style |= 4
-                    # Fixed: use run.font.strike, run.font.superscript, run.font.subscript
+                    # FIX: use run.font.strike, run.font.superscript, run.font.subscript
                     if run.font.strike: style |= 8
                     if run.font.superscript: style |= 16
                     if run.font.subscript: style |= 32
@@ -1657,7 +1657,7 @@ class PJPCompressor:
                 if style & 1: run.bold = True
                 if style & 2: run.italic = True
                 if style & 4: run.underline = True
-                # Fixed: use run.font.strike, etc.
+                # FIX: use run.font.strike, etc.
                 if style & 8: run.font.strike = True
                 if style & 16: run.font.superscript = True
                 if style & 32: run.font.subscript = True
@@ -1727,7 +1727,7 @@ class PJPCompressor:
                             if run.bold: style |= 1
                             if run.italic: style |= 2
                             if run.underline: style |= 4
-                            # Fixed: use run.font.strike, etc.
+                            # FIX: use run.font.strike, etc.
                             if run.font.strike: style |= 8
                             if run.font.superscript: style |= 16
                             if run.font.subscript: style |= 32
@@ -1807,7 +1807,7 @@ class PJPCompressor:
                             if style & 1: run.bold = True
                             if style & 2: run.italic = True
                             if style & 4: run.underline = True
-                            # Fixed: use run.font.strike, etc.
+                            # FIX: use run.font.strike, etc.
                             if style & 8: run.font.strike = True
                             if style & 16: run.font.superscript = True
                             if style & 32: run.font.subscript = True
@@ -2639,7 +2639,8 @@ def main():
         o = input("Output file: ").strip() or i.rsplit('.', 1)[0] + ".orig"
         c.decompress_file(i, o)
     elif choice == "7":
-        c.test_2704_pairs_lossless()
+        # This method is not defined; we'll call full_self_test instead.
+        c.full_self_test()
     else:
         print("Invalid choice.")
 
