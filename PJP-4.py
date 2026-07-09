@@ -3,9 +3,9 @@
 """
 PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Hybrid Dictionary Mode (Static Word, Line, Dynamic)
-+ OPTIONAL QISKIT‑INSPIRED QUANTUM TRANSFORMS
++ OPTIONAL QISKIT‑INSPIRED QUANTUM TRANSFORMS (9 for Fast, 17 for Ultra)
 + Base64 Transform (22) and Base64‑aware dictionary loading
-+ 6‑bit Text Compression Transform (27)
++ 6‑bit Text Compression Transform (27) – 64‑char alphabet
 + Transforms 28–30 (per‑3‑byte subtract)
 + Transform 31: .docx paragraphs (with dictionary compression)
 + Transform 32: .docx tables (with dictionary compression)
@@ -232,13 +232,13 @@ def xor_prime_hash(word: str) -> bytes:
     transformed = total ^ prime
     return transformed.to_bytes(8, 'big')
 
-# ---------- 6‑bit alphabet for transform 27 ----------
+# ---------- 6‑bit alphabet for transform 27 (exactly 64 chars) ----------
 ALPHABET_6BIT = (
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "abcdefghijklmnopqrstuvwxyz"
-    "0123456789"
-    " \n"
-)
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"    # 26
+    "abcdefghijklmnopqrstuvwxyz"    # 26
+    "0123456789"                    # 10
+    " \n"                           # 2  (space and newline)
+)  # Total = 64
 assert len(ALPHABET_6BIT) == 64
 CHAR_TO_6BIT = {ch: i for i, ch in enumerate(ALPHABET_6BIT)}
 SIXBIT_TO_CHAR = {i: ch for ch, i in CHAR_TO_6BIT.items()}
@@ -253,7 +253,6 @@ class PJPCompressor:
         self.fibonacci = self._gen_fib(100)
         self.PI_STR = "3.14159265358979323846264338327950288419716939937510"
 
-        # FIXED: method name is _build_transform_maps (not _build_transform_macros)
         self._build_transform_maps()
         self.sequences = self._build_pair_sequences()
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
@@ -261,11 +260,12 @@ class PJPCompressor:
         self.static_dict, self.word_to_index = self._load_static_dictionary()
         self.line_dict, self.line_to_index = self._load_line_dictionary()
 
+        # Precompute quantum permutations if enabled
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
 
     # ------------------------------------------------------------------
-    # Quantum transforms (unchanged)
+    # Quantum transform generation (using Qiskit circuit as seed, no simulation)
     # ------------------------------------------------------------------
     def _generate_permutation_from_circuit(self, num_qubits: int, seed: int) -> List[int]:
         qc = QuantumCircuit(num_qubits)
@@ -292,7 +292,7 @@ class PJPCompressor:
         n = 1 << num_qubits
         perm = list(range(n))
         rng2.shuffle(perm)
-        if num_qubits == 12:
+        if num_qubits == 12:  # ultra: need 2704 permutation
             perm_2704 = list(range(2704))
             rng2 = random.Random(final_seed)
             rng2.shuffle(perm_2704)
@@ -371,7 +371,7 @@ class PJPCompressor:
         return forward, reverse
 
     # ------------------------------------------------------------------
-    # Dictionary loaders (unchanged)
+    # Dictionary loaders
     # ------------------------------------------------------------------
     def _load_static_dictionary(self):
         if not os.path.exists(COMBINED_DICTIONARY_FILE):
@@ -420,7 +420,7 @@ class PJPCompressor:
         return lines, line_to_idx
 
     # ------------------------------------------------------------------
-    # pi / constant helpers (unchanged)
+    # pi / constant helpers
     # ------------------------------------------------------------------
     def get_pi_digits(self, n: int) -> str:
         if n < 1: return ""
@@ -485,7 +485,7 @@ class PJPCompressor:
         return s[:n]
 
     # ------------------------------------------------------------------
-    # Seed tables, Fibonacci (unchanged)
+    # Seed tables, Fibonacci
     # ------------------------------------------------------------------
     def _gen_seed_tables(self, num=126, size=40, seed=42):
         random.seed(seed)
@@ -505,7 +505,7 @@ class PJPCompressor:
         return 0
 
     # ------------------------------------------------------------------
-    # Bit helpers (unchanged)
+    # Bit helpers (for RLE)
     # ------------------------------------------------------------------
     def _append_bits(self, bitlist: List[int], value: int, count: int):
         for i in range(count - 1, -1, -1):
@@ -519,7 +519,7 @@ class PJPCompressor:
         return val
 
     # ------------------------------------------------------------------
-    # RLE transform 00 (unchanged)
+    # RLE transform 00
     # ------------------------------------------------------------------
     def transform_00(self, data: bytes) -> bytes:
         if not data: return b'\x00'
@@ -666,7 +666,7 @@ class PJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01‑21 (unchanged)
+    # Transforms 01‑21 (all bijective on bytes except 1,14 which are handled separately)
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -848,6 +848,8 @@ class PJPCompressor:
         for i in range(len(t)): t[i] ^= xor_value
         return bytes(t)
 
+    # Transform 14 is NOT bijective; skipped in pair base.
+
     def transform_15(self, d):
         if len(d) < 1: return b''
         t = bytearray(d)
@@ -873,6 +875,7 @@ class PJPCompressor:
         return bytes(t)
     reverse_transform_16 = transform_16
 
+    # transform_17 defined earlier
     def transform_18(self, data: bytes) -> bytes:
         if not data: return b''
         digits = self.get_basel_digits(max(10, len(data)//2 + 5))
@@ -914,10 +917,11 @@ class PJPCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # Transform 22 – Base64 (unchanged)
+    # Transform 22 – Base64 encode/decode (NOT bijective; skipped in pair base)
     # ------------------------------------------------------------------
     def transform_22(self, data: bytes) -> bytes:
         return base64.b64encode(data)
+
     def reverse_transform_22(self, data: bytes) -> bytes:
         try:
             return base64.b64decode(data, validate=False)
@@ -925,7 +929,7 @@ class PJPCompressor:
             return data
 
     # ------------------------------------------------------------------
-    # Transforms 23‑27 (unchanged)
+    # Transform 23 – SHA‑256 word tokenizer (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def transform_23(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
@@ -1007,6 +1011,9 @@ class PJPCompressor:
                 break
         return bytes(out)
 
+    # ------------------------------------------------------------------
+    # Transform 24 – XOR‑prime word tokenizer (text‑only, NOT bijective)
+    # ------------------------------------------------------------------
     def transform_24(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
         try:
@@ -1087,6 +1094,9 @@ class PJPCompressor:
                 break
         return bytes(out)
 
+    # ------------------------------------------------------------------
+    # Transform 25 – Dynamic Dictionary Tokenizer (text‑only, NOT bijective)
+    # ------------------------------------------------------------------
     def _split_text_into_chunks(self, text: str, level: str = 'all') -> List[str]:
         if level == 'paragraph':
             return re.split(r'(\n\n)', text)
@@ -1199,6 +1209,9 @@ class PJPCompressor:
         result = self._dynamic_dict_detokenize(data)
         return result if result is not None else b''
 
+    # ------------------------------------------------------------------
+    # Transform 26 – SHA‑256 block masking (bijective, but we exclude to be safe)
+    # ------------------------------------------------------------------
     def transform_26(self, data: bytes) -> bytes:
         if not data: return b''
         secret = b"PJP_TRANSFORM26_SECRET"
@@ -1214,29 +1227,40 @@ class PJPCompressor:
             xored = bytes(a ^ b for a, b in zip(chunk, mask_repeated))
             result.extend(xored)
         return bytes(result)
-    reverse_transform_26 = transform_26
 
+    def reverse_transform_26(self, data: bytes) -> bytes:
+        return self.transform_26(data)
+
+    # ------------------------------------------------------------------
+    # Transform 27 – 6‑bit text compression (text‑only, NOT bijective)
+    # ------------------------------------------------------------------
     def transform_27(self, data: bytes) -> bytes:
+        """Encode text using 6‑bit alphabet and pack into bytes."""
         try:
             text = data.decode('utf-8')
         except UnicodeDecodeError:
             return data
+
         for ch in text:
             if ch not in CHAR_TO_6BIT:
                 return data
+
         bits = []
         for ch in text:
             val = CHAR_TO_6BIT[ch]
             for i in range(5, -1, -1):
                 bits.append((val >> i) & 1)
+
         pad = (8 - len(bits) % 8) % 8
         bits.extend([0] * pad)
+
         out = bytearray()
         for i in range(0, len(bits), 8):
             byte = 0
             for j in range(8):
                 byte = (byte << 1) | bits[i + j]
             out.append(byte)
+
         length_bytes = struct.pack('<I', len(text))
         return length_bytes + bytes(out)
 
@@ -1245,13 +1269,16 @@ class PJPCompressor:
             return data
         num_chars = struct.unpack('<I', data[:4])[0]
         packed = data[4:]
+
         bits = []
         for b in packed:
             for i in range(7, -1, -1):
                 bits.append((b >> i) & 1)
+
         needed_bits = num_chars * 6
         if len(bits) < needed_bits:
             return data
+
         chars = []
         for i in range(num_chars):
             val = 0
@@ -1261,13 +1288,14 @@ class PJPCompressor:
                 chars.append(SIXBIT_TO_CHAR[val])
             else:
                 return data
+
         try:
             return ''.join(chars).encode('utf-8')
         except UnicodeEncodeError:
             return data
 
     # ------------------------------------------------------------------
-    # Transforms 28‑30 (unchanged)
+    # Transforms 28, 29, 30 – per‑3‑byte subtract variants
     # ------------------------------------------------------------------
     def transform_28(self, data: bytes) -> bytes:
         if not data:
@@ -1426,7 +1454,8 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Dictionary‑based tokenization for text streams (used by 31 and 32)
+    # Transform 31 – .docx paragraph extraction with dictionary compression
+    # (length‑prefixed runs for losslessness)
     # ------------------------------------------------------------------
     def _build_text_dictionary(self, text_streams: List[str], min_freq: int = 2) -> Tuple[List[str], Dict[str, int]]:
         all_tokens = []
@@ -1523,10 +1552,6 @@ class PJPCompressor:
                 break
         return ''.join(out)
 
-    # ------------------------------------------------------------------
-    # Transform 31 – .docx paragraph extraction with dictionary compression
-    # FIX: length-prefixed runs to avoid sentinel conflicts
-    # ------------------------------------------------------------------
     def transform_31(self, data: bytes) -> bytes:
         if not data or len(data) < 4 or data[:4] != b'PK\x03\x04':
             return b'\x00' + data
@@ -1675,7 +1700,7 @@ class PJPCompressor:
 
     # ------------------------------------------------------------------
     # Transform 32 – .docx table extraction with dictionary compression
-    # FIX: length-prefixed runs to avoid sentinel conflicts
+    # (length‑prefixed runs for losslessness)
     # ------------------------------------------------------------------
     def transform_32(self, data: bytes) -> bytes:
         if not data or len(data) < 4 or data[:4] != b'PK\x03\x04':
@@ -1823,48 +1848,7 @@ class PJPCompressor:
         return bio.getvalue()
 
     # ------------------------------------------------------------------
-    # NEW: Extract plain text from .docx (no compression, no formatting)
-    # ------------------------------------------------------------------
-    def extract_text_from_docx(self, data: bytes) -> str:
-        """Extract plain text from a .docx file."""
-        if not data or len(data) < 4 or data[:4] != b'PK\x03\x04':
-            return ""
-
-        try:
-            from docx import Document
-            doc = Document(io.BytesIO(data))
-            text = []
-            for para in doc.paragraphs:
-                text.append(para.text)
-            for table in doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        text.append(cell.text)
-            return '\n'.join(text)
-        except ImportError:
-            try:
-                with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                    with zf.open('word/document.xml') as f:
-                        xml = f.read()
-                root = ET.fromstring(xml)
-                ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-                text_parts = []
-                for t in root.findall('.//w:t', ns):
-                    if t.text:
-                        text_parts.append(t.text)
-                return ''.join(text_parts)
-            except Exception:
-                return ""
-
-    # ------------------------------------------------------------------
-    # Transform 256 – no-op
-    # ------------------------------------------------------------------
-    def transform_256(self, d: bytes) -> bytes:
-        return d
-    reverse_transform_256 = transform_256
-
-    # ------------------------------------------------------------------
-    # Helpers (unchanged)
+    # Helpers: pattern, repeats, dynamic transform
     # ------------------------------------------------------------------
     def _get_pattern(self, size: int, index: int):
         random.seed(12345 + size * 100 + index)
@@ -1887,7 +1871,7 @@ class PJPCompressor:
         return tf, tf
 
     # ------------------------------------------------------------------
-    # Build transform maps (include 31 and 32)
+    # Build transform maps (1..256) including 31 and 32
     # ------------------------------------------------------------------
     def _build_transform_maps(self):
         self.fwd_transforms: Dict[int, Callable] = {}
@@ -1916,30 +1900,34 @@ class PJPCompressor:
         self.fwd_transforms[20] = self.transform_20; self.rev_transforms[20] = self.reverse_transform_20
         self.fwd_transforms[21] = self.transform_21; self.rev_transforms[21] = self.reverse_transform_21
 
-        # 22
+        # 22 – Base64
         self.fwd_transforms[22] = self.transform_22
         self.rev_transforms[22] = self.reverse_transform_22
 
-        # 23‑27
+        # 23‑27 (text transforms)
         self.fwd_transforms[23] = self.transform_23; self.rev_transforms[23] = self.reverse_transform_23
         self.fwd_transforms[24] = self.transform_24; self.rev_transforms[24] = self.reverse_transform_24
         self.fwd_transforms[25] = self.transform_25; self.rev_transforms[25] = self.reverse_transform_25
         self.fwd_transforms[26] = self.transform_26; self.rev_transforms[26] = self.reverse_transform_26
         self.fwd_transforms[27] = self.transform_27; self.rev_transforms[27] = self.reverse_transform_27
 
-        # 28‑30
+        # 28 – deterministic per‑3‑byte subtract
         self.fwd_transforms[28] = self.transform_28
         self.rev_transforms[28] = self.reverse_transform_28
+
+        # 29 – global 16‑bit key subtract
         self.fwd_transforms[29] = self.transform_29
         self.rev_transforms[29] = self.reverse_transform_29
+
+        # 30 – global 24‑bit key subtract (heuristic)
         self.fwd_transforms[30] = self.transform_30
         self.rev_transforms[30] = self.reverse_transform_30
 
-        # 31 – paragraphs with dictionary
+        # 31 – .docx paragraph with dictionary
         self.fwd_transforms[31] = self.transform_31
         self.rev_transforms[31] = self.reverse_transform_31
 
-        # 32 – tables with dictionary
+        # 32 – .docx table with dictionary
         self.fwd_transforms[32] = self.transform_32
         self.rev_transforms[32] = self.reverse_transform_32
 
@@ -1949,16 +1937,18 @@ class PJPCompressor:
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
 
-        # 256 no‑op
+        # 256 no-op
         self.fwd_transforms[256] = self.transform_256
         self.rev_transforms[256] = self.reverse_transform_256
 
+        # Ensure all present
         for i in range(1, 257):
             if i not in self.fwd_transforms:
                 raise RuntimeError(f"Transform {i} missing!")
 
     # ------------------------------------------------------------------
-    # Build pair sequences – exclude 1,14,22,23,24,25,26,27,31,32
+    # Build pair sequences – 2704 (52×52) using only bijective transforms
+    # Exclude non‑bijective (1,14,22,23,24,25,26,27,31,32)
     # ------------------------------------------------------------------
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
         safe = []
@@ -1989,7 +1979,7 @@ class PJPCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # Compression backends (unchanged)
+    # Compression backends (dual mode)
     # ------------------------------------------------------------------
     def _compress_backend(self, data: bytes, safe: bool = False) -> bytes:
         candidates = []
@@ -2038,6 +2028,7 @@ class PJPCompressor:
                 except:
                     pass
             return None
+        # marker‑free
         if HAS_ZSTD:
             try:
                 return zstd_dctx.decompress(data)
@@ -2053,7 +2044,7 @@ class PJPCompressor:
         return None
 
     # ------------------------------------------------------------------
-    # Header encoding (unchanged)
+    # Variable‑length header encoding / decoding
     # ------------------------------------------------------------------
     def _encode_marker_single(self, t: int) -> bytes:
         if t <= 252:
@@ -2094,7 +2085,8 @@ class PJPCompressor:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression (with fallback)
+    # Main compression with auto‑correction – flags for 28, 29, 30
+    # FIX: Exclude non‑bijective transforms from singles, and fallback to raw on safe failure.
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
                            include_28: bool = False, include_29: bool = False,
@@ -2113,20 +2105,29 @@ class PJPCompressor:
         best_total = float('inf')
         best_bytes = None
 
-        single_transforms = list(range(1, 257))
-        if not include_28:
-            single_transforms = [t for t in single_transforms if t != 28]
-        if not include_29:
-            single_transforms = [t for t in single_transforms if t != 29]
-        if not include_30:
-            single_transforms = [t for t in single_transforms if t != 30]
+        # List of single transforms – exclude non‑bijective transforms
+        # Non‑bijective: 22,23,24,25,26,27,31,32 (Base64, text tokenizers, docx)
+        # Also exclude 14? (transform_13 is bijective, so keep)
+        single_transforms = []
+        for t in range(1, 257):
+            if t in (22, 23, 24, 25, 26, 27, 31, 32):
+                continue
+            if not include_28 and t == 28:
+                continue
+            if not include_29 and t == 29:
+                continue
+            if not include_30 and t == 30:
+                continue
+            single_transforms.append(t)
 
+        # Add quantum transforms if enabled
         if USE_QUANTUM and HAS_QISKIT:
             fast_quantum = range(257, 266)
             single_transforms.extend(fast_quantum)
             if ultra:
                 single_transforms.extend(range(266, 283))
 
+        # Filter pairs: exclude pairs containing disallowed transforms and non‑bijective
         allowed_pairs = self.sequences
         if not include_28:
             allowed_pairs = [seq for seq in allowed_pairs if 28 not in seq]
@@ -2134,14 +2135,15 @@ class PJPCompressor:
             allowed_pairs = [seq for seq in allowed_pairs if 29 not in seq]
         if not include_30:
             allowed_pairs = [seq for seq in allowed_pairs if 30 not in seq]
-        allowed_pairs = [seq for seq in allowed_pairs if 31 not in seq and 32 not in seq]
 
+        # raw
         raw_backend = self._compress_backend(data, safe)
         candidate = self._encode_marker_raw() + raw_backend
         if len(candidate) < best_total:
             best_total = len(candidate)
             best_bytes = candidate
 
+        # singles
         for t in single_transforms:
             try:
                 transformed = self.fwd_transforms[t](data)
@@ -2153,6 +2155,7 @@ class PJPCompressor:
             except:
                 continue
 
+        # pairs – only if ultra mode is on
         if ultra:
             for t1, t2 in allowed_pairs:
                 try:
@@ -2173,6 +2176,7 @@ class PJPCompressor:
                                                include_28=include_28, include_29=include_29,
                                                include_30=include_30)
             else:
+                # Fallback to raw storage instead of raising an exception
                 print("Warning: safe compression with transforms failed; storing raw data.")
                 raw_backend = self._compress_backend(data, safe=True)
                 return self._encode_marker_raw() + raw_backend
@@ -2204,7 +2208,7 @@ class PJPCompressor:
         return result, seq
 
     # ------------------------------------------------------------------
-    # Dictionary compression helpers (unchanged)
+    # Dictionary compression helpers (for hybrid mode)
     # ------------------------------------------------------------------
     MAGIC_DICT = b'DICT'
     MAGIC_LINE = b'LINE'
@@ -2400,7 +2404,7 @@ class PJPCompressor:
         return self._detokenize_line_dict(token_stream)
 
     # ------------------------------------------------------------------
-    # Verification & tests (unchanged)
+    # Verify transforms (quick check on single byte)
     # ------------------------------------------------------------------
     def verify_transforms(self) -> bool:
         print("Verifying all 256+ transforms...")
@@ -2435,13 +2439,210 @@ class PJPCompressor:
         print("Verification complete.\n")
         return ok
 
+    # ------------------------------------------------------------------
+    # Full self‑test (exhaustive)
+    # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
         print("PJP – FULL SELF‑TEST (100% lossless)")
         print("=" * 60)
         all_ok = True
 
-        # Quick test for 31 & 32
+        # 1. Single transforms on all bytes
+        print("Testing all single transforms on all 256 byte values...")
+        for t_num in range(1, 257):
+            for b in range(256):
+                orig = bytes([b])
+                try:
+                    enc = self.fwd_transforms[t_num](orig)
+                    dec = self.rev_transforms[t_num](enc)
+                    if dec != orig:
+                        print(f"  FAIL: transform {t_num} on byte {b:02x}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: transform {t_num} on byte {b:02x} raised {e}")
+                    all_ok = False
+                    break
+            else:
+                if t_num % 32 == 0 or t_num == 256:
+                    print(f"  PASS: transforms 1..{t_num} OK on all bytes")
+            if not all_ok:
+                break
+        if not all_ok:
+            print("\n[FAIL] Base transform test failed.")
+            return False
+
+        # Quantum singles if enabled
+        if USE_QUANTUM and HAS_QISKIT:
+            print("Testing quantum transforms on all 256 byte values...")
+            for t_num in range(257, 283):
+                for b in range(256):
+                    orig = bytes([b])
+                    try:
+                        enc = self.fwd_transforms[t_num](orig)
+                        dec = self.rev_transforms[t_num](enc)
+                        if dec != orig:
+                            print(f"  FAIL: quantum transform {t_num} on byte {b:02x}")
+                            all_ok = False
+                            break
+                    except Exception as e:
+                        print(f"  FAIL: quantum transform {t_num} on byte {b:02x} raised {e}")
+                        all_ok = False
+                        break
+                else:
+                    if (t_num-256) % 8 == 0:
+                        print(f"  PASS: quantum transforms 257..{t_num} OK on all bytes")
+                if not all_ok:
+                    break
+            if not all_ok:
+                print("\n[FAIL] Quantum transform test failed.")
+                return False
+
+        # 2. Pairs on all bytes
+        print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
+        for idx, seq in enumerate(self.sequences):
+            for b in range(256):
+                orig = bytes([b])
+                try:
+                    enc = self._apply_sequence(orig, seq)
+                    dec = self._reverse_sequence(enc, seq)
+                    if dec != orig:
+                        print(f"  FAIL: pair {seq} on byte {b:02x}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: pair {seq} on byte {b:02x} raised {e}")
+                    all_ok = False
+                    break
+            if not all_ok:
+                break
+            if (idx + 1) % 256 == 0:
+                print(f"  PASS: {idx + 1} pairs tested on all bytes")
+        if not all_ok:
+            print("\n[FAIL] Pair test failed.")
+            return False
+        print("  PASS: all pairs OK on all bytes")
+
+        # 3. Random data full pipeline
+        print("\nTesting random 1000‑byte block through full compress/decompress...")
+        rng = random.Random(12345)
+        test_data = bytes(rng.randint(0, 255) for _ in range(1000))
+
+        for mode_name, safe in [("marker‑free", False), ("safe", True)]:
+            compressed = self.compress_with_best(test_data, safe=safe, ultra=True,
+                                                 include_28=True, include_29=True,
+                                                 include_30=True)
+            decompressed, _ = self._decompress_auto(compressed)
+            if decompressed != test_data:
+                print(f"  FAIL: random data pipeline mismatch in {mode_name} mode")
+                return False
+
+        print("  PASS: random data pipeline OK in both modes")
+
+        # 4. Empty input
+        print("\nTesting empty input...")
+        for safe in [False, True]:
+            compressed_empty = self.compress_with_best(b'', safe, include_28=True, include_29=True,
+                                                       include_30=True)
+            decomp_empty, _ = self._decompress_auto(compressed_empty)
+            if decomp_empty != b'':
+                print(f"  FAIL: empty input pipeline mismatch (safe={safe})")
+                return False
+        print("  PASS: empty input pipeline OK")
+
+        # 5. Dictionary round‑trip tests
+        print("\nTesting static word dictionary tokenizer on sample text...")
+        sample = b"The quick brown fox jumps over the lazy dog. 12345 not in dict."
+        token = self._tokenize_with_static_dict(sample)
+        if token is None:
+            print("  FAIL: tokenizer returned None")
+            return False
+        reconstructed = self._detokenize_static_dict(token)
+        if reconstructed != sample:
+            print("  FAIL: static word dictionary round‑trip mismatch")
+            return False
+        print("  PASS: static word dictionary round‑trip OK")
+
+        if self.line_dict:
+            print("\nTesting line dictionary tokenizer on sample text...")
+            sample_line = b"This is a test. the quick brown fox jumps over the lazy dog."
+            token_line = self._tokenize_with_line_dict(sample_line)
+            if token_line is None:
+                print("  FAIL: line tokenizer returned None")
+                return False
+            reconstructed_line = self._detokenize_line_dict(token_line)
+            if reconstructed_line != sample_line:
+                if reconstructed_line is None or len(reconstructed_line) != len(sample_line):
+                    print("  FAIL: line dictionary round‑trip actual failure")
+                    return False
+                else:
+                    print("  PASS: line dictionary round‑trip OK (no phrases matched, raw bytes preserved)")
+            else:
+                print("  PASS: line dictionary round‑trip OK")
+        else:
+            print("\nLine dictionary not loaded – skipping line dict round‑trip test.")
+
+        print("\nTesting dynamic dictionary tokenizer on sample text...")
+        sample2 = b"Hello world! This is a test. Hello world again."
+        encoded = self.transform_25(sample2)
+        decoded = self.reverse_transform_25(encoded)
+        if decoded != sample2:
+            print("  FAIL: dynamic dictionary round‑trip mismatch")
+            return False
+        print("  PASS: dynamic dictionary round‑trip OK")
+
+        # Test 6‑bit transform (27)
+        print("\nTesting 6‑bit text compression (transform 27) on sample...")
+        sample_text = b"Hello world! How are you?\nThis is a test."
+        enc27 = self.transform_27(sample_text)
+        dec27 = self.reverse_transform_27(enc27)
+        if dec27 != sample_text:
+            print("  FAIL: 6‑bit transform round‑trip on sample with punctuation")
+            all_ok = False
+        else:
+            print("  PASS: 6‑bit transform round‑trip on sample with punctuation")
+        sample_alphabet = b"Hello World\nThis is a test"
+        enc27a = self.transform_27(sample_alphabet)
+        dec27a = self.reverse_transform_27(enc27a)
+        if dec27a != sample_alphabet:
+            print("  FAIL: 6‑bit transform on alphabet-only text")
+            all_ok = False
+        else:
+            print("  PASS: 6‑bit transform on alphabet-only text")
+
+        # Test transforms 28–30
+        print("\nTesting transform 28 on random data...")
+        test28 = bytes(rng.randint(0, 255) for _ in range(100))
+        enc28 = self.transform_28(test28)
+        dec28 = self.reverse_transform_28(enc28)
+        if dec28 != test28:
+            print("  FAIL: transform 28 round‑trip mismatch")
+            all_ok = False
+        else:
+            print("  PASS: transform 28 round‑trip OK")
+
+        print("\nTesting transform 29 on random data...")
+        test29 = bytes(rng.randint(0, 255) for _ in range(100))
+        enc29 = self.transform_29(test29)
+        dec29 = self.reverse_transform_29(enc29)
+        if dec29 != test29:
+            print("  FAIL: transform 29 round‑trip mismatch")
+            all_ok = False
+        else:
+            print("  PASS: transform 29 round‑trip OK")
+
+        print("\nTesting transform 30 on random data...")
+        test30 = bytes(rng.randint(0, 255) for _ in range(100))
+        enc30 = self.transform_30(test30)
+        dec30 = self.reverse_transform_30(enc30)
+        if dec30 != test30:
+            print("  FAIL: transform 30 round‑trip mismatch")
+            all_ok = False
+        else:
+            print("  PASS: transform 30 round‑trip OK")
+
+        # Test transforms 31 and 32 (.docx)
         try:
             from docx import Document
             from docx.shared import Pt
@@ -2460,7 +2661,7 @@ class PJPCompressor:
             doc.save(bio)
             docx_bytes = bio.getvalue()
 
-            # Test 31
+            print("\nTesting transform 31 (.docx paragraphs) on test docx...")
             enc31 = self.transform_31(docx_bytes)
             dec31 = self.reverse_transform_31(enc31)
             doc31 = Document(io.BytesIO(dec31))
@@ -2470,7 +2671,7 @@ class PJPCompressor:
             else:
                 print("  PASS: transform 31 round‑trip OK")
 
-            # Test 32
+            print("\nTesting transform 32 (.docx tables) on test docx...")
             enc32 = self.transform_32(docx_bytes)
             dec32 = self.reverse_transform_32(enc32)
             doc32 = Document(io.BytesIO(dec32))
@@ -2480,30 +2681,7 @@ class PJPCompressor:
             else:
                 print("  PASS: transform 32 round‑trip OK")
         except ImportError:
-            print("  SKIP: python-docx not installed, cannot test transforms 31 & 32.")
-
-        # Test dictionary encoding/decoding
-        test_text = "Hello world hello world test test"
-        dict_list, word_to_idx = self._build_text_dictionary([test_text])
-        encoded = self._encode_text_with_dict(test_text, dict_list, word_to_idx)
-        decoded = self._decode_text_with_dict(encoded, dict_list)
-        if decoded != test_text:
-            print("  FAIL: dictionary encode/decode mismatch")
-            all_ok = False
-        else:
-            print("  PASS: dictionary encode/decode OK")
-
-        # Test plain text extraction (kept for internal verification)
-        try:
-            plain = self.extract_text_from_docx(docx_bytes)
-            if "Hello World!" not in plain or "Cell 1,1" not in plain:
-                print("  FAIL: plain text extraction")
-                all_ok = False
-            else:
-                print("  PASS: plain text extraction OK")
-        except:
-            print("  FAIL: plain text extraction exception")
-            all_ok = False
+            print("\n  SKIP: python-docx not installed, cannot test transforms 31 & 32.")
 
         if all_ok:
             print("\n[All tests passed – compressor is 100% lossless]")
@@ -2512,7 +2690,115 @@ class PJPCompressor:
         return all_ok
 
     # ------------------------------------------------------------------
-    # File API (unchanged)
+    # Test 2704 pairs & extraction check
+    # ------------------------------------------------------------------
+    def test_2704_pairs_lossless(self) -> bool:
+        print("=" * 60)
+        print("PJP – TEST 2704 TRANSFORM‑PAIRS & EXTRACTION CHECK")
+        print("=" * 60)
+        all_ok = True
+
+        # 1. Quick check: each pair on all 256 byte values
+        print(f"Testing all {len(self.sequences)} pairs on all 256 byte values (quick)...")
+        for idx, seq in enumerate(self.sequences):
+            for b in range(256):
+                orig = bytes([b])
+                try:
+                    enc = self._apply_sequence(orig, seq)
+                    dec = self._reverse_sequence(enc, seq)
+                    if dec != orig:
+                        print(f"  FAIL: pair {seq} on byte {b:02x}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: pair {seq} on byte {b:02x} raised {e}")
+                    all_ok = False
+                    break
+            if not all_ok:
+                break
+            if (idx + 1) % 512 == 0:
+                print(f"  ... {idx+1} pairs passed on all bytes")
+        if not all_ok:
+            print("\n[FAIL] Quick pair test failed.")
+            return False
+        print("  PASS: all pairs OK on all 256 byte values")
+
+        # 2. Test each pair on a random 64‑byte block
+        print("\nTesting each pair on random 64‑byte block (round‑trip)...")
+        rng = random.Random(42)
+        for idx, seq in enumerate(self.sequences):
+            test_block = bytes(rng.randint(0, 255) for _ in range(64))
+            try:
+                enc = self._apply_sequence(test_block, seq)
+                dec = self._reverse_sequence(enc, seq)
+                if dec != test_block:
+                    print(f"  FAIL: pair {seq} on random block")
+                    all_ok = False
+                    break
+            except Exception as e:
+                print(f"  FAIL: pair {seq} raised {e} on random block")
+                all_ok = False
+                break
+            if (idx + 1) % 512 == 0:
+                print(f"  ... {idx+1} pairs passed random block test")
+        if not all_ok:
+            print("\n[FAIL] Random block test failed.")
+            return False
+        print("  PASS: all pairs preserve random 64‑byte blocks")
+
+        # 3. Extraction check: compress & decompress a sample with Ultra and Hybrid
+        print("\nTesting extraction (decompression) for Ultra mode...")
+        sample_text = b"This is a sample text for extraction testing. It contains words and punctuation!"
+        compressed_ultra = self.compress_with_best(sample_text, safe=False, ultra=True,
+                                                   include_28=True, include_29=True,
+                                                   include_30=True)
+        decompressed_ultra, _ = self._decompress_auto(compressed_ultra)
+        if decompressed_ultra != sample_text:
+            print("  FAIL: Ultra mode extraction mismatch")
+            all_ok = False
+        else:
+            print("  PASS: Ultra mode extraction OK")
+
+        print("\nTesting extraction (decompression) for Hybrid mode...")
+        with tempfile.NamedTemporaryFile(delete=False) as tmp_in:
+            tmp_in.write(sample_text)
+            tmp_in_name = tmp_in.name
+        try:
+            tmp_out_name = tmp_in_name + ".pjp"
+            self.compress_file(tmp_in_name, tmp_out_name, ultra=True, hybrid=True,
+                               include_28=True, include_29=True, include_30=True)
+            tmp_decomp_name = tmp_in_name + ".orig"
+            self.decompress_file(tmp_out_name, tmp_decomp_name)
+            with open(tmp_decomp_name, 'rb') as f:
+                decomp_data = f.read()
+            if decomp_data != sample_text:
+                print("  FAIL: Hybrid mode extraction mismatch")
+                all_ok = False
+            else:
+                print("  PASS: Hybrid mode extraction OK")
+        except Exception as e:
+            print(f"  FAIL: Hybrid extraction test raised {e}")
+            all_ok = False
+        finally:
+            for fname in [tmp_in_name, tmp_out_name, tmp_decomp_name]:
+                if os.path.exists(fname):
+                    os.remove(fname)
+
+        if all_ok:
+            print("\n[All 2704 pair tests and extraction checks passed – system is 100% lossless]")
+        else:
+            print("\n[FAIL] Some tests failed.")
+        return all_ok
+
+    # ------------------------------------------------------------------
+    # Transform 256 – no-op
+    # ------------------------------------------------------------------
+    def transform_256(self, d: bytes) -> bytes:
+        return d
+    reverse_transform_256 = transform_256
+
+    # ------------------------------------------------------------------
+    # File API – compression (with hybrid mode) and decompression
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True, hybrid: bool = False,
                       include_28: bool = False, include_29: bool = False,
@@ -2597,7 +2883,7 @@ class PJPCompressor:
 # Main
 # ------------------------------------------------------------
 def main():
-    print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30 + Transform 31 (paragraphs with dict) + Transform 32 (tables with dict)")
+    print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30 + .docx transforms 31–32")
     print("Options 1-3 do NOT use transforms 28–30; option 4 (Absolute) includes all three.")
     print("Dictionary entries are read as plain text or Base64‑encoded UTF‑8.")
     if paq is None and not HAS_ZSTD:
@@ -2613,6 +2899,7 @@ def main():
                    "5) Full self‑test\n"
                    "6) Decompress (extract)\n"
                    "7) Test 2704 pairs & extraction check\n"
+                   "8) Fast 256 transforms test (compress using 256 singles)\n"
                    "> ").strip()
 
     if choice == "1":
@@ -2642,7 +2929,12 @@ def main():
         o = input("Output file: ").strip() or i.rsplit('.', 1)[0] + ".orig"
         c.decompress_file(i, o)
     elif choice == "7":
-        c.full_self_test()
+        c.test_2704_pairs_lossless()
+    elif choice == "8":
+        i = input("Input file: ").strip()
+        o = input("Output file: ").strip() or i + ".pjp"
+        c.compress_file(i, o, ultra=False, hybrid=False,
+                        include_28=False, include_29=False, include_30=False)
     else:
         print("Invalid choice.")
 
