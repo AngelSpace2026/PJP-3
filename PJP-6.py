@@ -172,7 +172,7 @@ def run_paq8px_decompress(infile: str, outfile: str):
 # ------------------------------------------------------------------
 USE_QUANTUM = False
 HAS_QISKIT = False
-QuantumCircuit = None          # FIX: declare global variable
+QuantumCircuit = None
 
 PROGNAME = "PJP"
 
@@ -2030,28 +2030,31 @@ class PJPCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # Compression backends – using single‑byte markers:
-    #   0xFD = paq,  0xFE = zstd,  0xFC = raw
+    # Compression backends – with force option
     # ------------------------------------------------------------------
-    def _compress_backend(self, data: bytes, safe: bool = False) -> bytes:
+    def _compress_backend(self, data: bytes, safe: bool = False, force: Optional[str] = None) -> bytes:
         candidates = []
-        if paq is not None:
-            try:
-                if safe:
-                    candidates.append((b'\xFD', b'\xFD' + paq.compress(data)))
-                else:
-                    candidates.append((b'L', paq.compress(data)))   # marker‑free for non‑safe
-            except:
-                pass
-        if HAS_ZSTD:
-            try:
-                if safe:
-                    candidates.append((b'\xFE', b'\xFE' + zstd_cctx.compress(data)))
-                else:
-                    candidates.append((b'Z', zstd_cctx.compress(data)))   # marker‑free
-            except:
-                pass
-        # raw: use 0xFC for safe, 'N' for marker‑free
+        # PAQ
+        if force is None or force == 'paq':
+            if paq is not None:
+                try:
+                    if safe:
+                        candidates.append((b'\xFD', b'\xFD' + paq.compress(data)))
+                    else:
+                        candidates.append((b'L', paq.compress(data)))
+                except:
+                    pass
+        # ZSTD
+        if force is None or force == 'zstd':
+            if HAS_ZSTD:
+                try:
+                    if safe:
+                        candidates.append((b'\xFE', b'\xFE' + zstd_cctx.compress(data)))
+                    else:
+                        candidates.append((b'Z', zstd_cctx.compress(data)))
+                except:
+                    pass
+        # Raw fallback
         if safe:
             candidates.append((b'\xFC', b'\xFC' + data))
         else:
@@ -2059,12 +2062,8 @@ class PJPCompressor:
 
         if not candidates:
             return b'N' + data if not safe else b'\xFC' + data
-        if not safe:
-            _, best = min(candidates, key=lambda x: len(x[1]))
-            return best
-        else:
-            _, best = min(candidates, key=lambda x: len(x[1]))
-            return best
+        _, best = min(candidates, key=lambda x: len(x[1]))
+        return best
 
     def _decompress_backend(self, data: bytes, safe: bool = False) -> Optional[bytes]:
         if len(data) == 0:
@@ -2146,14 +2145,16 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
                            include_28: bool = False, include_29: bool = False,
-                           include_30: bool = False) -> bytes:
+                           include_30: bool = False,
+                           force_backend: Optional[str] = None) -> bytes:
         if not data:
             compressed = self._encode_marker_raw() + b''
             decomp, _ = self._decompress_auto(compressed)
             if decomp != b'':
                 return self.compress_with_best(data, safe=True, ultra=ultra,
                                                include_28=include_28, include_29=include_29,
-                                               include_30=include_30)
+                                               include_30=include_30,
+                                               force_backend=force_backend)
             return compressed
 
         best_total = float('inf')
@@ -2193,7 +2194,7 @@ class PJPCompressor:
         for t in single_transforms:
             try:
                 transformed = self.fwd_transforms[t](data)
-                backend = self._compress_backend(transformed, safe)
+                backend = self._compress_backend(transformed, safe, force=force_backend)
                 candidate = self._encode_marker_single(t) + backend
                 if len(candidate) < best_total:
                     best_total = len(candidate)
@@ -2205,7 +2206,7 @@ class PJPCompressor:
             for t1, t2 in allowed_pairs:
                 try:
                     transformed = self._apply_sequence(data, (t1, t2))
-                    backend = self._compress_backend(transformed, safe)
+                    backend = self._compress_backend(transformed, safe, force=force_backend)
                     candidate = self._encode_marker_pair(t1, t2) + backend
                     if len(candidate) < best_total:
                         best_total = len(candidate)
@@ -2219,7 +2220,8 @@ class PJPCompressor:
                 print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
                 return self.compress_with_best(data, safe=True, ultra=ultra,
                                                include_28=include_28, include_29=include_29,
-                                               include_30=include_30)
+                                               include_30=include_30,
+                                               force_backend=force_backend)
             else:
                 print("Warning: safe compression with transforms failed; storing raw data.")
                 raw_candidate = self._encode_marker_raw() + data
@@ -2710,7 +2712,8 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True, hybrid: bool = False,
                       include_28: bool = False, include_29: bool = False,
-                      include_30: bool = False, strip_front: int = 0):
+                      include_30: bool = False, strip_front: int = 0,
+                      force_backend: Optional[str] = None):
         try:
             with open(infile, 'rb') as f:
                 data = f.read()
@@ -2732,7 +2735,8 @@ class PJPCompressor:
 
         c_pjp = self.compress_with_best(data, safe=False, ultra=ultra,
                                         include_28=include_28, include_29=include_29,
-                                        include_30=include_30)
+                                        include_30=include_30,
+                                        force_backend=force_backend)
         candidates.append(('PJP', c_pjp))
 
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
@@ -2938,6 +2942,9 @@ def main():
                    "6) Decompress (extract)\n"
                    "7) Test 2704 pairs & extraction check\n"
                    "8) Fast 256 transforms test (compress using 256 singles)\n"
+                   "9) Compress with paq only (if available)\n"
+                   "10) Compress with zstd only (if available)\n"
+                   "11) Compress with both (paq + zstd, pick best)\n"
                    "> ").strip()
 
     if choice == "1":
@@ -2978,6 +2985,24 @@ def main():
         c.compress_file(i, o, ultra=False, hybrid=False,
                         include_28=False, include_29=False, include_30=False,
                         strip_front=4)
+    elif choice == "9":
+        i = input("Input file: ").strip()
+        o = input("Output file: ").strip() or i + ".pjp"
+        c.compress_file(i, o, ultra=True, hybrid=False,
+                        include_28=True, include_29=True, include_30=True,
+                        strip_front=4, force_backend='paq')
+    elif choice == "10":
+        i = input("Input file: ").strip()
+        o = input("Output file: ").strip() or i + ".pjp"
+        c.compress_file(i, o, ultra=True, hybrid=False,
+                        include_28=True, include_29=True, include_30=True,
+                        strip_front=4, force_backend='zstd')
+    elif choice == "11":
+        i = input("Input file: ").strip()
+        o = input("Output file: ").strip() or i + ".pjp"
+        c.compress_file(i, o, ultra=True, hybrid=False,
+                        include_28=True, include_29=True, include_30=True,
+                        strip_front=4, force_backend='best')
     else:
         print("Invalid choice.")
 
