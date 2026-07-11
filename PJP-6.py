@@ -172,7 +172,7 @@ def run_paq8px_decompress(infile: str, outfile: str):
 # ------------------------------------------------------------------
 USE_QUANTUM = False
 HAS_QISKIT = False
-QuantumCircuit = None          # <-- FIX: declare global variable
+QuantumCircuit = None          # FIX: declare global variable
 
 PROGNAME = "PJP"
 
@@ -324,7 +324,7 @@ CHAR_TO_6BIT = {ch: i for i, ch in enumerate(ALPHABET_6BIT)}
 SIXBIT_TO_CHAR = {i: ch for ch, i in CHAR_TO_6BIT.items()}
 
 # ------------------------------------------------------------------
-# Full PJPCompressor class (identical to the one provided by the user)
+# Full PJPCompressor class
 # ------------------------------------------------------------------
 class PJPCompressor:
     def __init__(self):
@@ -349,7 +349,6 @@ class PJPCompressor:
     # Quantum transform generation (using Qiskit circuit as seed, no simulation)
     # ------------------------------------------------------------------
     def _generate_permutation_from_circuit(self, num_qubits: int, seed: int) -> List[int]:
-        # Use the global QuantumCircuit (defined only if quantum is enabled)
         global QuantumCircuit
         if QuantumCircuit is None:
             raise RuntimeError("QuantumCircuit not available. Enable quantum support first.")
@@ -386,7 +385,6 @@ class PJPCompressor:
             return perm
 
     def _precompute_quantum_transforms(self):
-        # Safety check
         global QuantumCircuit
         if QuantumCircuit is None:
             print("QuantumCircuit not available; skipping quantum transforms.")
@@ -2864,7 +2862,7 @@ class PJPCompressor:
 # Main – with CLI flags for paq8px and interactive PJP menu
 # ------------------------------------------------------------
 def main():
-    global USE_QUANTUM, HAS_QISKIT, QuantumCircuit   # <-- FIX: declare globals we modify
+    global USE_QUANTUM, HAS_QISKIT, QuantumCircuit
 
     # Command-line flags for paq8px operations
     if len(sys.argv) > 1:
@@ -2895,8 +2893,8 @@ def main():
     quantum_choice = input("Enable quantum‑inspired transforms (requires Qiskit)? (y/n): ").strip().lower()
     if quantum_choice == 'y':
         try:
-            from qiskit import QuantumCircuit   # <-- local import
-            QuantumCircuit = QuantumCircuit     # <-- assign to global variable
+            from qiskit import QuantumCircuit
+            QuantumCircuit = QuantumCircuit
             HAS_QISKIT = True
             USE_QUANTUM = True
             print("Quantum transforms ENABLED (Qiskit already installed).")
@@ -2973,7 +2971,6 @@ def main():
         o = input("Output file: ").strip() or i.rsplit('.', 1)[0] + ".orig"
         c.decompress_file(i, o)
     elif choice == "7":
-        # c.test_2704_pairs_lossless()   # <-- this method does not exist; you may implement or remove
         print("Option 7 not implemented yet (test_2704_pairs_lossless missing).")
     elif choice == "8":
         i = input("Input file: ").strip()
